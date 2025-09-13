@@ -4,19 +4,19 @@ from Models.TrainModel import ChexnetTrainer
 #-------------------------------------------------------------------------------- 
 
 def main():
-    # runTrain()
-    runTest()
+    runTrain()
+    #runTest()
   
 #--------------------------------------------------------------------------------   
 
 def runTrain():
     # ---- Path to the directory with images
-    pathDirData = './Dataset'
+    pathDirData = '/kaggle/input/data'
     
     # ---- Paths to the dataset files
-    pathFileTrain = './Dataset/train_list.txt'
-    pathFileVal   = './Dataset/val_list.txt'
-    pathFileTest  = './Dataset/test_list.txt'
+    pathFileTrain = '/kaggle/working/train_list.txt'
+    pathFileVal   = '/kaggle/working/val_list.txt'
+    pathFileTest  = '/kaggle/working/test_list.txt'
     
     # ---- Parameters
     nnIsTrained   = True
@@ -42,14 +42,14 @@ def runTrain():
 #-------------------------------------------------------------------------------- 
 
 def runTest():
-    pathDirData   = './Dataset'
-    pathFileTest  = './Dataset/test_list.txt'
+    pathDirData   = '/kaggle/input/data'
+    pathFileTest  = '/kaggle/working/test_list.txt'
     nnClassCount  = 14
     trBatchSize   = 16
     imgtransCrop  = 224
     
     # ---- model đã train sẵn
-    pathModel = 'Trainedmodel/chexnetmodel.pth'
+    pathModel = '/kaggle/working/chexnetmodel.pth'
     
     ChexnetTrainer.test(pathDirData, pathFileTest, pathModel,
                         nnClassCount, trBatchSize, imgtransCrop)
