@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
 import os
 import urllib.request
 import tarfile
 
-# URLs for the zip files
+base_dir = "CheXNet/Database"
+
+
 links = [
     'https://nihcc.box.com/shared/static/vfk49d74nhbxq3nqjg0900w5nvkorp5c.gz',
     'https://nihcc.box.com/shared/static/i28rlmbvmfjbl8p2n3ril0pptcmcu9d1.gz',
@@ -20,13 +21,20 @@ links = [
 ]
 
 for idx, link in enumerate(links):
-    fn = os.path.join("CheXNet/Dataset", f"images_{idx+1:02d}.tar.gz")
+    fn = os.path.join(base_dir, f"images_{idx+1:03d}.tar.gz")
     print(f"📥 Đang tải {fn} ...")
     urllib.request.urlretrieve(link, fn)
 
-    # Giải nén file .tar.gz ngay sau khi tải
-    print(f"📂 Đang giải nén {fn} ...")
-    with tarfile.open(fn, "r:gz") as tar:
-        tar.extractall(path="CheXNet/Dataset")
+    # Tạo thư mục cùng tên với file nén (bỏ .tar.gz)
+    extract_dir = os.path.splitext(os.path.splitext(fn)[0])[0]
+    os.makedirs(extract_dir, exist_ok=True)
 
-print("✅ Hoàn tất tải và giải nén tất cả file vào thư mục Dataset")
+    # Giải nén vào thư mục riêng
+    print(f"📂 Đang giải nén {fn} vào {extract_dir} ...")
+    with tarfile.open(fn, "r:gz") as tar:
+        tar.extractall(path=extract_dir, filter="data")
+    
+    os.remove(fn)
+    print(f"🗑️ Đã xóa {fn}")
+
+print("✅ Hoàn tất tải và giải nén tất cả file vào thư mục riêng trong CheXNet/Database")
