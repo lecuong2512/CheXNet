@@ -11,7 +11,7 @@ def main():
 
 def runTrain():
     # ---- Path to the directory with images
-    pathDirData = './Dataset'
+    pathDirData = './Database'
     
     # ---- Paths to the dataset files
     pathFileTrain = './Dataset/train_list.txt'
