@@ -158,7 +158,7 @@ class ChexnetTrainer:
         CLASS_NAMES = ['Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
                        'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax',
                        'Consolidation', 'Edema', 'Emphysema', 'Fibrosis',
-                       'Pleural_Thickening', 'Hernia']
+                       'Pleural_Thickening', 'Hernia', 'No Finding']
 
         device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = DenseNet121(nnClassCount, isTrained=False).to(device)
