@@ -20,7 +20,7 @@ def runTrain():
     
     # ---- Parameters
     nnIsTrained   = True
-    nnClassCount  = 14
+    nnClassCount  = 15
     trBatchSize   = 16
     trMaxEpoch    = 100
     imgtransCrop  = 224
@@ -42,9 +42,9 @@ def runTrain():
 #-------------------------------------------------------------------------------- 
 
 def runTest():
-    pathDirData   = './Dataset'
+    pathDirData   = './Database'
     pathFileTest  = './Dataset/test_list.txt'
-    nnClassCount  = 14
+    nnClassCount  = 15
     trBatchSize   = 16
     imgtransCrop  = 224
     
