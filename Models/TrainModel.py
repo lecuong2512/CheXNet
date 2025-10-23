@@ -1,5 +1,6 @@
 import os
 from collections import OrderedDict
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,10 +11,10 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import roc_auc_score
 
 try:
-    from Models.Model import DenseNet121
+    from Models.Model import DenseNet121, ConvNeXtV2Large
     from Models.read_data import DatasetGenerator
 except ImportError:
-    from Model import DenseNet121
+    from Model import DenseNet121, ConvNeXtV2Large
     from read_data import DatasetGenerator
 
 
@@ -23,16 +24,31 @@ class ChexnetTrainer:
     def train(pathDirData, pathFileTrain, pathFileVal,
               nnIsTrained, nnClassCount,
               trBatchSize, trMaxEpoch,
-              transCrop, pathModel='Trainedmodel/chexnetmodel.pth',
-              checkpoint=None):
+              transCrop, pathModel='CheXNet/Trainedmodel/chexnetmodel.pth',
+              checkpoint=None, model_type='convnextv2_large'):
+        """
+        Train model with support for multiple architectures.
+        
+        Args:
+            model_type: 'densenet121' or 'convnextv2_large'
+        """
 
         # ---- Device & Model
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = DenseNet121(nnClassCount, nnIsTrained).to(device)
+        
+        # Select model architecture
+        if model_type.lower() == 'convnextv2_large':
+            model = ConvNeXtV2Large(nnClassCount, nnIsTrained).to(device)
+            print(f"Using ConvNeXtV2-Large architecture")
+        else:
+            model = DenseNet121(nnClassCount, nnIsTrained).to(device)
+            print(f"Using DenseNet121 architecture")
+            
         if torch.cuda.is_available():
             model = torch.nn.DataParallel(model).to(device)
 
         # ---- Data transforms
+        # ConvNeXtV2 sử dụng ImageNet normalization giống DenseNet
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                          [0.229, 0.224, 0.225])
         transformTrain = transforms.Compose([
@@ -42,7 +58,7 @@ class ChexnetTrainer:
             normalize
         ])
         transformVal = transforms.Compose([
-            transforms.Resize(256),
+            transforms.Resize(224),
             transforms.CenterCrop(transCrop),
             transforms.ToTensor(),
             normalize
@@ -59,7 +75,9 @@ class ChexnetTrainer:
                                      shuffle=False, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
 
         # ---- Optimizer & Scheduler
-        optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
+        # ConvNeXtV2 thường dùng learning rate thấp hơn
+        lr = 5e-5 if model_type.lower() == 'convnextv2_large' else 1e-4
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
         scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=5, mode='min')
 
         # ---- Loss
@@ -84,6 +102,9 @@ class ChexnetTrainer:
             bestLoss = ckpt.get('best_loss', bestLoss)
 
         # ---- Training loop
+        print("\n" + "="*80)
+        print(f"Starting training from epoch 1 to {trMaxEpoch}")
+        print("="*80 + "\n")
         for epoch in range(trMaxEpoch):
             trainLoss = ChexnetTrainer.epochTrain(model, dataLoaderTrain, optimizer, criterion, device)
             valLoss = ChexnetTrainer.epochVal(model, dataLoaderVal, criterion, device)
@@ -98,7 +119,8 @@ class ChexnetTrainer:
                     'epoch': epoch + 1,
                     'state_dict': state_dict_to_save,
                     'best_loss': bestLoss,
-                    'optimizer': optimizer.state_dict()
+                    'optimizer': optimizer.state_dict(),
+                    'model_type': model_type
                 }, pathModel)
                 print(f"[{epoch+1}] [save] train_loss={trainLoss:.4f} val_loss={valLoss:.4f} -> {pathModel}")
             else:
@@ -108,7 +130,7 @@ class ChexnetTrainer:
     def epochTrain(model, dataLoader, optimizer, criterion, device):
         model.train()
         totalLoss, count = 0.0, 0
-        for input, target in dataLoader:
+        for input, target in tqdm(dataLoader, desc="Training", unit="batch"):
             non_blocking = torch.cuda.is_available()
             input = input.to(device, non_blocking=non_blocking)
             target = target.to(device, non_blocking=non_blocking)
@@ -128,7 +150,7 @@ class ChexnetTrainer:
         model.eval()
         totalLoss, count = 0.0, 0
         with torch.no_grad():
-            for input, target in dataLoader:
+            for input, target in tqdm(dataLoader, desc="Validation", unit="batch"):
                 non_blocking = torch.cuda.is_available()
                 input = input.to(device, non_blocking=non_blocking)
                 target = target.to(device, non_blocking=non_blocking)
@@ -153,7 +175,13 @@ class ChexnetTrainer:
     @staticmethod
     def test(pathDirData, pathFileTest, pathModel,
              nnClassCount, trBatchSize, transCrop,
-             device=None):
+             device=None, model_type=None):
+        """
+        Test model with support for multiple architectures.
+        
+        Args:
+            model_type: 'densenet121' or 'convnextv2_large'. If None, will try to read from checkpoint.
+        """
 
         CLASS_NAMES = ['Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
                        'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax',
@@ -161,8 +189,20 @@ class ChexnetTrainer:
                        'Pleural_Thickening', 'Hernia', 'No Finding']
 
         device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = DenseNet121(nnClassCount, isTrained=False).to(device)
+        
+        # Load checkpoint to determine model type if not specified
         ckpt = torch.load(pathModel, map_location=device)
+        if model_type is None:
+            model_type = ckpt.get('model_type', 'convnextv2_large')
+        
+        # Create model based on type
+        if model_type.lower() == 'convnextv2_large':
+            model = ConvNeXtV2Large(nnClassCount, isTrained=False).to(device)
+            print(f"Testing with ConvNeXtV2-Large architecture")
+        else:
+            model = DenseNet121(nnClassCount, isTrained=False).to(device)
+            print(f"Testing with DenseNet121 architecture")
+        
         state_dict = ckpt['state_dict']
         try:
             model.load_state_dict(state_dict)
@@ -178,7 +218,7 @@ class ChexnetTrainer:
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                          [0.229, 0.224, 0.225])
         transformTest = transforms.Compose([
-            transforms.Resize(256),
+            transforms.Resize(224),
             transforms.CenterCrop(transCrop),
             transforms.ToTensor(),
             normalize
