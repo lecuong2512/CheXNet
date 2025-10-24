@@ -70,9 +70,9 @@ class ChexnetTrainer:
 
         use_cuda = torch.cuda.is_available()
         dataLoaderTrain = DataLoader(datasetTrain, batch_size=trBatchSize,
-                                     shuffle=True, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
+                                     shuffle=True, num_workers=2 if use_cuda else 0, pin_memory=use_cuda)
         dataLoaderVal   = DataLoader(datasetVal, batch_size=trBatchSize,
-                                     shuffle=False, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
+                                     shuffle=False, num_workers=2 if use_cuda else 0, pin_memory=use_cuda)
 
         # ---- Optimizer & Scheduler
         # ConvNeXtV2 thường dùng learning rate thấp hơn
@@ -227,7 +227,7 @@ class ChexnetTrainer:
         datasetTest = DatasetGenerator(pathDirData, pathFileTest, transformTest)
         use_cuda = torch.cuda.is_available()
         dataLoaderTest = DataLoader(datasetTest, batch_size=trBatchSize,
-                                    shuffle=False, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
+                                    shuffle=False, num_workers=2 if use_cuda else 0, pin_memory=use_cuda)
 
         outGT = torch.FloatTensor().to(device)
         outPRED = torch.FloatTensor().to(device)
