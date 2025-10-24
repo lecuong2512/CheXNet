@@ -4,8 +4,8 @@ from Models.TrainModel import ChexnetTrainer
 #-------------------------------------------------------------------------------- 
 
 def main():
-    # runTrain()
-    runTest()
+    runTrain()
+    #runTest()
   
 #--------------------------------------------------------------------------------   
 
@@ -21,14 +21,14 @@ def runTrain():
     # ---- Parameters
     nnIsTrained   = True
     nnClassCount  = 15
-    trBatchSize   = 16
+    trBatchSize   = 64
     trMaxEpoch    = 100
     imgtransCrop  = 224
     
     # ---- Model save path (cố định tên chexnetmodel.pth)
     pathModel = 'Trainedmodel/chexnetmodel.pth'
     
-    print('Training DenseNet121 ...')
+    print('Training ...')
     ChexnetTrainer.train(pathDirData, pathFileTrain, pathFileVal,
                          nnIsTrained, nnClassCount,
                          trBatchSize, trMaxEpoch,
@@ -45,7 +45,7 @@ def runTest():
     pathDirData   = './Database'
     pathFileTest  = './Dataset/test_list.txt'
     nnClassCount  = 15
-    trBatchSize   = 16
+    trBatchSize   = 64
     imgtransCrop  = 224
     
     # ---- model đã train sẵn
