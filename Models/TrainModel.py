@@ -61,9 +61,9 @@ class ChexnetTrainer:
 
         use_cuda = torch.cuda.is_available()
         dataLoaderTrain = DataLoader(datasetTrain, batch_size=trBatchSize,
-                                     shuffle=True, num_workers=2 if use_cuda else 0, pin_memory=use_cuda)
+                                     shuffle=True, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
         dataLoaderVal   = DataLoader(datasetVal, batch_size=trBatchSize,
-                                     shuffle=False, num_workers=2 if use_cuda else 0, pin_memory=use_cuda)
+                                     shuffle=False, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
 
         # ---- Optimizer & Scheduler
         # THAY ĐỔI 2: Dùng AdamW và LR thấp (5e-5) cho mô hình Large
@@ -266,7 +266,7 @@ class ChexnetTrainer:
         datasetTest = DatasetGenerator(pathDirData, pathFileTest, transformTest)
         use_cuda = torch.cuda.is_available()
         dataLoaderTest = DataLoader(datasetTest, batch_size=trBatchSize,
-                                    shuffle=False, num_workers=2 if use_cuda else 0, pin_memory=use_cuda)
+                                    shuffle=False, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
 
         outGT = torch.FloatTensor().to(device)
         outPRED = torch.FloatTensor().to(device)
