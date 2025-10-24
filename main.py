@@ -11,8 +11,8 @@ def train_convnextv2():
         pathFileTrain='./Dataset/train_list.txt',
         pathFileVal='./Dataset/val_list.txt',
         nnIsTrained=True,  # Sử dụng pretrained weights
-        nnClassCount=64,   # Số lượng class
-        trBatchSize=32,    # Batch size (ConvNeXtV2-Large cần memory nhiều hơn)
+        nnClassCount=15,   # Số lượng class
+        trBatchSize=64,    # Batch size (ConvNeXtV2-Large cần memory nhiều hơn)
         trMaxEpoch=100,
         transCrop=224,
         pathModel='CheXNet/Trainedmodel/chexnetmodel.pth',
@@ -70,7 +70,7 @@ def test_auto_detect():
         pathFileTest='./Dataset/test_list.txt',
         pathModel='./Trainedmodel/chexnetmodel.pth',
         nnClassCount=15,
-        trBatchSize=16,
+        trBatchSize=64,
         transCrop=224
         # Không cần model_type, tự động detect
     )
