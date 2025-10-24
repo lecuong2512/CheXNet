@@ -1,4 +1,4 @@
-# Models/TrainModel.py (updated for SwinV1-Large 224x224 via timm)
+# Models/TrainModel.py (updated with auto GPU detection)
 import os
 from tqdm import tqdm
 from collections import OrderedDict
@@ -26,19 +26,39 @@ class ChexnetTrainer:
               trBatchSize, trMaxEpoch,
               transCrop, pathModel='CheXNet/Trainedmodel/chexnetmodel.pth',
               checkpoint=None,
-              # THAY ĐỔI 1: Cập nhật model_variant mặc định
               model_variant='swin_large_patch4_window7_224.ms_in22k_ft_in1k'):
 
-        # ---- Device & Model
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # ---- Device & GPU Detection
+        if torch.cuda.is_available():
+            num_gpus = torch.cuda.device_count()
+            print(f"\n{'='*80}")
+            print(f"GPU Detection: Found {num_gpus} GPU(s)")
+            for i in range(num_gpus):
+                gpu_name = torch.cuda.get_device_name(i)
+                gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3
+                print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f} GB)")
+            print(f"{'='*80}\n")
+            device = torch.device('cuda')
+        else:
+            print("\n" + "="*80)
+            print("WARNING: No GPU detected! Training will use CPU (very slow)")
+            print("="*80 + "\n")
+            device = torch.device('cpu')
+            num_gpus = 0
         
-        # Truyền model_variant vào model
+        # ---- Load Model
         model = SwinTransformer(nnClassCount, nnIsTrained, model_variant=model_variant).to(device)
         
-        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        # ---- Auto DataParallel for Multi-GPU
+        if num_gpus > 1:
+            print(f"Using DataParallel across {num_gpus} GPUs")
             model = torch.nn.DataParallel(model)
-
+            # Tăng batch size tự động theo số GPU (tùy chọn)
+            effective_batch_size = trBatchSize * num_gpus
+            print(f"Effective batch size: {trBatchSize} x {num_gpus} = {effective_batch_size}")
+        elif num_gpus == 1:
+            print("Using single GPU")
+        
         # ---- Data transforms
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                          [0.229, 0.224, 0.225])
@@ -59,15 +79,31 @@ class ChexnetTrainer:
         datasetTrain = DatasetGenerator(pathDirData, pathFileTrain, transformTrain)
         datasetVal   = DatasetGenerator(pathDirData, pathFileVal, transformVal)
 
-        use_cuda = torch.cuda.is_available()
-        dataLoaderTrain = DataLoader(datasetTrain, batch_size=trBatchSize,
-                                     shuffle=True, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
-        dataLoaderVal   = DataLoader(datasetVal, batch_size=trBatchSize,
-                                     shuffle=False, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
+        # Tự động điều chỉnh num_workers dựa trên GPU
+        num_workers = 4 * num_gpus if num_gpus > 0 else 0
+        num_workers = min(num_workers, os.cpu_count() or 4)  # Giới hạn bởi số CPU cores
+        
+        print(f"DataLoader workers: {num_workers}")
+        
+        dataLoaderTrain = DataLoader(
+            datasetTrain, 
+            batch_size=trBatchSize,
+            shuffle=True, 
+            num_workers=num_workers, 
+            pin_memory=(num_gpus > 0),
+            persistent_workers=(num_workers > 0)
+        )
+        dataLoaderVal = DataLoader(
+            datasetVal, 
+            batch_size=trBatchSize,
+            shuffle=False, 
+            num_workers=num_workers, 
+            pin_memory=(num_gpus > 0),
+            persistent_workers=(num_workers > 0)
+        )
 
         # ---- Optimizer & Scheduler
-        # THAY ĐỔI 2: Dùng AdamW và LR thấp (5e-5) cho mô hình Large
-        print("Using AdamW optimizer with lr=5e-5 and weight_decay=1e-5 for Swin-Large")
+        print(f"Using AdamW optimizer with lr=5e-5 and weight_decay=1e-5 for {model_variant}")
         optimizer = optim.AdamW(model.parameters(), lr=5e-5, weight_decay=1e-5)
         scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=5, mode='min')
 
@@ -131,12 +167,19 @@ class ChexnetTrainer:
                     'best_loss': bestLoss,
                     'best_auroc': bestAUROC,
                     'optimizer': optimizer.state_dict(),
-                    'model_variant': model_variant # Lưu model_variant
+                    'model_variant': model_variant
                 }, pathModel)
                 reason_str = "+".join(save_reason)
                 print(f"[Epoch {epoch+1:3d}/{trMaxEpoch}] [SAVED-{reason_str}] train_loss={trainLoss:.4f} val_loss={valLoss:.4f} val_auroc={valAUROC:.4f} lr={current_lr:.6f}")
             else:
                 print(f"[Epoch {epoch+1:3d}/{trMaxEpoch}] [----------] train_loss={trainLoss:.4f} val_loss={valLoss:.4f} val_auroc={valAUROC:.4f} lr={current_lr:.6f}")
+            
+            # In GPU memory usage sau mỗi epoch
+            if torch.cuda.is_available():
+                for i in range(num_gpus):
+                    memory_allocated = torch.cuda.memory_allocated(i) / 1024**3
+                    memory_reserved = torch.cuda.memory_reserved(i) / 1024**3
+                    print(f"  GPU {i} Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
         
         print("\n" + "="*80)
         print(f"Training completed! Best val_loss={bestLoss:.4f}, Best val_auroc={bestAUROC:.4f}")
@@ -148,7 +191,7 @@ class ChexnetTrainer:
         totalLoss, count = 0.0, 0
         pbar = tqdm(dataLoader, desc="Training", leave=False)
         for input, target in pbar:
-            non_blocking = torch.cuda.is_available()
+            non_blocking = (device.type == 'cuda')
             input = input.to(device, non_blocking=non_blocking)
             target = target.to(device, non_blocking=non_blocking)
             
@@ -175,7 +218,7 @@ class ChexnetTrainer:
         pbar = tqdm(dataLoader, desc="Validating", leave=False)
         with torch.no_grad():
             for input, target in pbar:
-                non_blocking = torch.cuda.is_available()
+                non_blocking = (device.type == 'cuda')
                 input = input.to(device, non_blocking=non_blocking)
                 target = target.to(device, non_blocking=non_blocking)
                 
@@ -213,7 +256,6 @@ class ChexnetTrainer:
     def test(pathDirData, pathFileTest, pathModel,
              nnClassCount, trBatchSize, transCrop,
              device=None,
-             # THAY ĐỔI 3: Cập nhật model_variant mặc định
              model_variant='swin_large_patch4_window7_224.ms_in22k_ft_in1k'):
 
         CLASS_NAMES = ['Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
@@ -221,13 +263,24 @@ class ChexnetTrainer:
                        'Consolidation', 'Edema', 'Emphysema', 'Fibrosis',
                        'Pleural_Thickening', 'Hernia', 'No Finding']
 
-        device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # ---- Auto detect device
+        if device is None:
+            if torch.cuda.is_available():
+                num_gpus = torch.cuda.device_count()
+                print(f"\n{'='*80}")
+                print(f"GPU Detection: Found {num_gpus} GPU(s) for testing")
+                for i in range(num_gpus):
+                    print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+                print(f"{'='*80}\n")
+                device = torch.device('cuda')
+            else:
+                print("Using CPU for testing")
+                device = torch.device('cpu')
 
         # Load checkpoint
         print(f"Loading model from: {pathModel}")
         ckpt = torch.load(pathModel, map_location=device)
         
-        # Tải model_variant từ checkpoint
         model_variant_from_ckpt = ckpt.get('model_variant', model_variant)
         print(f"Loading model architecture: {model_variant_from_ckpt}")
         
@@ -244,9 +297,14 @@ class ChexnetTrainer:
                 model.load_state_dict(stripped)
             else:
                 raise
+        
+        # Multi-GPU for testing
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            print(f"Using DataParallel for testing with {torch.cuda.device_count()} GPUs")
+            model = torch.nn.DataParallel(model)
+        
         model.eval()
         
-        # Print checkpoint info
         epoch = ckpt.get('epoch', 'unknown')
         best_loss = ckpt.get('best_loss', 'unknown')
         best_auroc = ckpt.get('best_auroc', 'unknown')
@@ -265,8 +323,15 @@ class ChexnetTrainer:
         # Dataset & DataLoader
         datasetTest = DatasetGenerator(pathDirData, pathFileTest, transformTest)
         use_cuda = torch.cuda.is_available()
-        dataLoaderTest = DataLoader(datasetTest, batch_size=trBatchSize,
-                                    shuffle=False, num_workers=4 if use_cuda else 0, pin_memory=use_cuda)
+        num_workers = 4 if use_cuda else 0
+        
+        dataLoaderTest = DataLoader(
+            datasetTest, 
+            batch_size=trBatchSize,
+            shuffle=False, 
+            num_workers=num_workers, 
+            pin_memory=use_cuda
+        )
 
         outGT = torch.FloatTensor().to(device)
         outPRED = torch.FloatTensor().to(device)
@@ -274,7 +339,7 @@ class ChexnetTrainer:
         print(f"Testing on {len(datasetTest)} images...")
         with torch.no_grad():
             for input, target in tqdm(dataLoaderTest, desc="Testing"):
-                non_blocking = torch.cuda.is_available()
+                non_blocking = use_cuda
                 input = input.to(device, non_blocking=non_blocking)
                 target = target.to(device, non_blocking=non_blocking)
                 
