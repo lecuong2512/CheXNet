@@ -85,8 +85,8 @@ def train_with_resume():
         trBatchSize=32,
         trMaxEpoch=100,
         transCrop=224,
-        pathModel='./Trainedmodel/chexnet_resumed.pth',
-        checkpoint='./Trainedmodel/chexnet_resumed.pth',  # Resume from here
+        pathModel='./Trainedmodel/convnextv2_large_chexnet.pth',
+        checkpoint='./Trainedmodel/convnextv2_large_chexnet.pth',  # Resume from here
         model_type='convnextv2_large'
     )
 
