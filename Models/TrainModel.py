@@ -1,362 +1,454 @@
+# TrainModel.py
 import os
 import time
-from collections import OrderedDict
 from tqdm import tqdm
+from collections import OrderedDict
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.metrics import roc_auc_score
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from sklearn.metrics import roc_auc_score, accuracy_score
 
 try:
-    from Models.Model import MultiModelArchitecture, DenseNet121, ConvNeXtV2Large
+    from Models.Model import ConvNeXtV2Model
     from Models.read_data import DatasetGenerator
 except ImportError:
-    from Model import MultiModelArchitecture, DenseNet121, ConvNeXtV2Large
+    from Model import ConvNeXtV2Model
     from read_data import DatasetGenerator
 
 
 class ChexnetTrainer:
-    
-    @staticmethod
-    def detect_gpus():
-        """Detect available GPUs and return device information"""
-        if not torch.cuda.is_available():
-            print("❌ No CUDA GPUs detected. Using CPU.")
-            return torch.device('cpu'), 0, []
-        
-        gpu_count = torch.cuda.device_count()
-        gpu_info = []
-        
-        print(f"✅ Detected {gpu_count} CUDA GPU(s):")
-        for i in range(gpu_count):
-            gpu_name = torch.cuda.get_device_name(i)
-            gpu_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-            gpu_info.append({
-                'id': i,
-                'name': gpu_name,
-                'memory_gb': gpu_memory
-            })
-            print(f"   GPU {i}: {gpu_name} ({gpu_memory:.1f} GB)")
-        
-        device = torch.device('cuda:0')
-        return device, gpu_count, gpu_info
+    CLASS_NAMES = [
+        'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
+        'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax',
+        'Consolidation', 'Edema', 'Emphysema', 'Fibrosis',
+        'Pleural_Thickening', 'Hernia', 'No Finding'
+    ]
 
     @staticmethod
     def train(pathDirData, pathFileTrain, pathFileVal,
               nnIsTrained, nnClassCount,
               trBatchSize, trMaxEpoch,
-              transCrop, pathModel='Trainedmodel/chexnetmodel.pth',
-              checkpoint=None, model_type='densenet121',
-              custom_lr=None, custom_batch_size=None):
-        """
-        Enhanced training with multi-GPU support and real-time monitoring.
-        
-        Args:
-            model_type: Choose from:
-                DenseNet: 'densenet121', 'densenet169', 'densenet201'
-                ConvNeXtV2: 'convnextv2_base', 'convnextv2_large', 'convnextv2_huge'
-                EfficientNetV2: 'efficientnetv2_s', 'efficientnetv2_m', 'efficientnetv2_l'
-                Swin: 'swin_tiny', 'swin_small', 'swin_base'
-            custom_lr: Override recommended learning rate
-            custom_batch_size: Override recommended batch size
-        """
-        
-        print("\n" + "="*80)
-        print("🚀 INITIALIZING TRAINING")
+              transCrop, pathModel='CheXNet/Trainedmodel/chexnetmodel.pth',
+              checkpoint=None, start_epoch=0):
+
         print("="*80)
+        print("ChestX-ray14 Multi-Label Classification Training")
+        print("Backbone: ConvNeXtV2-Large")
+        print("="*80)
+
+        # ---- Device Setup (Multi-GPU)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"\nDevice: {device}")
         
-        # Detect GPUs
-        device, gpu_count, gpu_info = ChexnetTrainer.detect_gpus()
-        
-        # Create model
-        print(f"\n📦 Loading model: {model_type}")
-        model = MultiModelArchitecture(model_type, nnClassCount, nnIsTrained).to(device)
-        
-        # Multi-GPU setup
-        if gpu_count > 1:
-            print(f"🔄 Using DataParallel across {gpu_count} GPUs")
-            model = torch.nn.DataParallel(model, device_ids=list(range(gpu_count)))
-        
-        # Get recommended hyperparameters
-        if custom_lr is None:
-            lr = MultiModelArchitecture.get_recommended_lr(model_type)
-            print(f"📊 Using recommended learning rate: {lr}")
+        # ---- Tensor Core Optimization
+        has_tensor_cores = False
+        if torch.cuda.is_available():
+            print(f"GPU Count: {torch.cuda.device_count()}")
+            for i in range(torch.cuda.device_count()):
+                gpu_name = torch.cuda.get_device_name(i)
+                compute_cap = torch.cuda.get_device_capability(i)
+                print(f"  GPU {i}: {gpu_name}")
+                print(f"    Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.2f} GB")
+                print(f"    Compute Capability: {compute_cap[0]}.{compute_cap[1]}")
+                
+                # Tensor Cores available on: Volta (7.0+), Turing (7.5+), Ampere (8.0+), Ada/Hopper (8.9+)
+                if compute_cap[0] >= 7:
+                    has_tensor_cores = True
+                    print(f"    ✓ Tensor Cores: ENABLED")
+            
+            if has_tensor_cores:
+                print("\n🚀 Tensor Core Optimizations:")
+                # Enable TF32 for Ampere+ GPUs (huge speedup)
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                print("  ✓ TF32 enabled for matmul and cuDNN")
+                
+                # Enable cuDNN autotuner for best performance
+                torch.backends.cudnn.benchmark = True
+                print("  ✓ cuDNN benchmark autotuner enabled")
+                
+                # Use channels_last memory format for better Tensor Core utilization
+                print("  ✓ Channels-last memory format will be used")
         else:
-            lr = custom_lr
-            print(f"📊 Using custom learning rate: {lr}")
+            print("⚠ No CUDA device found")
+
+        # ---- Model
+        model = ConvNeXtV2Model(
+            num_classes=nnClassCount,
+            pretrained=nnIsTrained,
+            dropout_rate=0.2
+        ).to(device)
         
-        if custom_batch_size is not None:
-            trBatchSize = custom_batch_size
-            print(f"📦 Using custom batch size: {trBatchSize}")
-        elif gpu_info:
-            recommended_bs = MultiModelArchitecture.get_recommended_batch_size(
-                model_type, gpu_info[0]['memory_gb']
-            )
-            if trBatchSize != recommended_bs:
-                print(f"💡 Recommended batch size for your GPU: {recommended_bs}")
-                print(f"📦 Using specified batch size: {trBatchSize}")
+        # Convert to channels_last for Tensor Core optimization
+        if has_tensor_cores:
+            model = model.to(memory_format=torch.channels_last)
+            print("  ✓ Model converted to channels_last format")
         
-        # Data transforms
+        # Multi-GPU support
+        if torch.cuda.device_count() > 1:
+            print(f"\nUsing {torch.cuda.device_count()} GPUs (DataParallel)")
+            model = torch.nn.DataParallel(model)
+
+        # ---- Data Transforms (Larger size for better performance)
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                          [0.229, 0.224, 0.225])
+        
         transformTrain = transforms.Compose([
-            transforms.RandomResizedCrop(transCrop),
+            transforms.RandomResizedCrop(transCrop, scale=(0.8, 1.0)),
             transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
             transforms.ToTensor(),
             normalize
         ])
+        
         transformVal = transforms.Compose([
-            transforms.Resize(256),
+            transforms.Resize(int(transCrop * 1.14)),  # 384 -> 438
             transforms.CenterCrop(transCrop),
             transforms.ToTensor(),
             normalize
         ])
-        
-        # Datasets & Loaders
-        print("\n📚 Loading datasets...")
+
+        # ---- Datasets & Loaders
+        print("\nLoading datasets...")
         datasetTrain = DatasetGenerator(pathDirData, pathFileTrain, transformTrain)
-        datasetVal = DatasetGenerator(pathDirData, pathFileVal, transformVal)
-        
-        print(f"   Training samples: {len(datasetTrain)}")
-        print(f"   Validation samples: {len(datasetVal)}")
-        
-        use_cuda = torch.cuda.is_available()
-        num_workers = min(8, os.cpu_count() or 2) if use_cuda else 0
-        
+        datasetVal   = DatasetGenerator(pathDirData, pathFileVal, transformVal)
+
+        num_workers = min(8, os.cpu_count() or 4)
         dataLoaderTrain = DataLoader(
-            datasetTrain, batch_size=trBatchSize,
-            shuffle=True, num_workers=num_workers, 
-            pin_memory=use_cuda, persistent_workers=use_cuda
+            datasetTrain, 
+            batch_size=trBatchSize,
+            shuffle=True, 
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=True if num_workers > 0 else False
         )
         dataLoaderVal = DataLoader(
-            datasetVal, batch_size=trBatchSize,
-            shuffle=False, num_workers=num_workers, 
-            pin_memory=use_cuda, persistent_workers=use_cuda
+            datasetVal, 
+            batch_size=trBatchSize,
+            shuffle=False, 
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=True if num_workers > 0 else False
         )
+
+        print(f"Train samples: {len(datasetTrain)}")
+        print(f"Val samples: {len(datasetVal)}")
+        print(f"Batch size: {trBatchSize}")
+        print(f"Steps per epoch: {len(dataLoaderTrain)}")
+
+        # ---- Optimizer & Scheduler (Advanced)
+        # Use fused optimizer for Tensor Core GPUs (faster)
+        if has_tensor_cores and hasattr(torch.optim, 'AdamW'):
+            try:
+                optimizer = torch.optim.AdamW(
+                    model.parameters(),
+                    lr=1e-4,
+                    weight_decay=0.05,
+                    betas=(0.9, 0.999),
+                    fused=True  # Fused AdamW for Ampere+ GPUs
+                )
+                print("  ✓ Using fused AdamW optimizer")
+            except:
+                optimizer = optim.AdamW(
+                    model.parameters(),
+                    lr=1e-4,
+                    weight_decay=0.05,
+                    betas=(0.9, 0.999)
+                )
+        else:
+            optimizer = optim.AdamW(
+                model.parameters(),
+                lr=1e-4,
+                weight_decay=0.05,
+                betas=(0.9, 0.999)
+            )
         
-        # Optimizer & Scheduler
-        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-        scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=5, mode='min', verbose=True)
+        # Cosine annealing with warm restarts
+        scheduler = CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=10,
+            T_mult=2,
+            eta_min=1e-6
+        )
+
+        # ---- Loss (BCE with logits for numerical stability)
+        criterion = nn.BCEWithLogitsLoss()
+
+        # ---- Mixed Precision Training
+        # Use bfloat16 on Ampere+ for better Tensor Core utilization, else float16
+        use_bf16 = has_tensor_cores and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+        if use_bf16:
+            scaler = torch.amp.GradScaler('cuda', enabled=False)  # No scaling needed for bfloat16
+            amp_dtype = torch.bfloat16
+            print("  ✓ Using bfloat16 (Ampere+ optimal)")
+        else:
+            scaler = torch.amp.GradScaler('cuda')
+            amp_dtype = torch.float16
+            print("  ✓ Using float16 with gradient scaling")
         
-        # Loss
-        criterion = nn.BCELoss()
-        
-        # Load checkpoint if provided
-        start_epoch = 0
+        # Store for epoch functions
+        ChexnetTrainer._amp_dtype = amp_dtype
+        ChexnetTrainer._has_tensor_cores = has_tensor_cores
+
+        # ---- Load checkpoint if exists
         bestLoss = float("inf")
-        if checkpoint:
-            print(f"\n📂 Loading checkpoint: {checkpoint}")
-            ckpt = torch.load(checkpoint, map_location=device)
+        bestAUROC = 0.0
+        
+        if checkpoint and os.path.exists(checkpoint):
+            print(f"\nLoading checkpoint: {checkpoint}")
+            ckpt = torch.load(checkpoint, map_location=device,weights_only=False)
+            
             state_dict = ckpt['state_dict']
             target_model = model.module if isinstance(model, torch.nn.DataParallel) else model
             
             try:
                 target_model.load_state_dict(state_dict)
-            except Exception:
+            except Exception as e:
+                print(f"Warning: {e}")
+                # Handle DataParallel prefix
                 if any(k.startswith('module.') for k in state_dict.keys()):
-                    stripped = OrderedDict((k[7:], v) if k.startswith('module.') else (k, v)
-                                           for k, v in state_dict.items())
+                    stripped = OrderedDict(
+                        (k[7:], v) if k.startswith('module.') else (k, v)
+                        for k, v in state_dict.items()
+                    )
                     target_model.load_state_dict(stripped)
-                else:
-                    raise
             
             if 'optimizer' in ckpt:
                 optimizer.load_state_dict(ckpt['optimizer'])
-            start_epoch = ckpt.get('epoch', 0)
+            if 'scheduler' in ckpt:
+                scheduler.load_state_dict(ckpt['scheduler'])
+            
             bestLoss = ckpt.get('best_loss', bestLoss)
-            print(f"   Resumed from epoch {start_epoch}, best loss: {bestLoss:.4f}")
-        
-        # Training loop
+            bestAUROC = ckpt.get('best_auroc', bestAUROC)
+            start_epoch = ckpt.get('epoch', start_epoch)
+            
+            print(f"Resumed from epoch {start_epoch}, best_loss={bestLoss:.4f}, best_auroc={bestAUROC:.4f}")
+
+        # ---- Training Loop
         print("\n" + "="*80)
-        print(f"🏋️ STARTING TRAINING (Epochs {start_epoch+1} to {trMaxEpoch})")
-        print("="*80 + "\n")
-        
-        training_start_time = time.time()
+        print("Starting Training")
+        print("="*80)
         
         for epoch in range(start_epoch, trMaxEpoch):
-            epoch_start = time.time()
+            print(f"\nEpoch [{epoch+1}/{trMaxEpoch}]")
+            print("-" * 60)
             
             # Train
-            trainLoss, train_time = ChexnetTrainer.epochTrain(
-                model, dataLoaderTrain, optimizer, criterion, device, epoch+1
+            trainLoss, trainAUROC, trainAcc = ChexnetTrainer.epochTrain(
+                model, dataLoaderTrain, optimizer, criterion, device, scaler
             )
             
             # Validate
-            valLoss, val_time = ChexnetTrainer.epochVal(
-                model, dataLoaderVal, criterion, device, epoch+1
+            valLoss, valAUROC, valAcc = ChexnetTrainer.epochVal(
+                model, dataLoaderVal, criterion, device
             )
             
             # Update scheduler
-            scheduler.step(valLoss)
+            scheduler.step()
+            
+            # Current learning rate
             current_lr = optimizer.param_groups[0]['lr']
             
-            epoch_time = time.time() - epoch_start
-            total_time = time.time() - training_start_time
+            # Print metrics
+            print(f"\n{'Metric':<20} {'Train':<15} {'Val':<15}")
+            print("-" * 50)
+            print(f"{'Loss':<20} {trainLoss:<15.4f} {valLoss:<15.4f}")
+            print(f"{'AUROC':<20} {trainAUROC:<15.4f} {valAUROC:<15.4f}")
+            print(f"{'Accuracy':<20} {trainAcc:<15.4f} {valAcc:<15.4f}")
+            print(f"{'Learning Rate':<20} {current_lr:<15.6f}")
             
-            # Print epoch summary
-            print(f"\n{'='*80}")
-            print(f"📊 EPOCH {epoch+1}/{trMaxEpoch} SUMMARY")
-            print(f"{'='*80}")
-            print(f"   Train Loss:      {trainLoss:.4f}  (⏱️  {train_time:.1f}s)")
-            print(f"   Val Loss:        {valLoss:.4f}  (⏱️  {val_time:.1f}s)")
-            print(f"   Learning Rate:   {current_lr:.2e}")
-            print(f"   Epoch Time:      {epoch_time:.1f}s")
-            print(f"   Total Time:      {ChexnetTrainer._format_time(total_time)}")
+            # VRAM usage
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    allocated = torch.cuda.memory_allocated(i) / 1024**3
+                    reserved = torch.cuda.memory_reserved(i) / 1024**3
+                    print(f"GPU {i} VRAM: {allocated:.2f}GB / {reserved:.2f}GB")
             
             # Save best model
-            if valLoss < bestLoss:
+            is_best = valAUROC > bestAUROC
+            if is_best:
+                bestAUROC = valAUROC
                 bestLoss = valLoss
+                
                 os.makedirs(os.path.dirname(pathModel) or '.', exist_ok=True)
                 
-                state_dict_to_save = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+                state_dict_to_save = (
+                    model.module.state_dict() 
+                    if isinstance(model, torch.nn.DataParallel) 
+                    else model.state_dict()
+                )
                 
                 torch.save({
                     'epoch': epoch + 1,
                     'state_dict': state_dict_to_save,
                     'best_loss': bestLoss,
+                    'best_auroc': bestAUROC,
                     'optimizer': optimizer.state_dict(),
-                    'model_type': model_type
+                    'scheduler': scheduler.state_dict()
                 }, pathModel)
                 
-                print(f"   ✅ BEST MODEL SAVED → {pathModel}")
+                print(f"\n✓ Model saved: {pathModel} (AUROC: {bestAUROC:.4f})")
             else:
-                print(f"   💾 No improvement (best: {bestLoss:.4f})")
-            
-            print(f"{'='*80}\n")
-        
-        print("✅ Training completed!")
-        print(f"🏆 Best validation loss: {bestLoss:.4f}")
-        print(f"⏱️  Total training time: {ChexnetTrainer._format_time(time.time() - training_start_time)}")
+                print(f"\n  Best AUROC: {bestAUROC:.4f}")
 
     @staticmethod
-    def epochTrain(model, dataLoader, optimizer, criterion, device, epoch_num):
-        """Training epoch with real-time loss display"""
+    def epochTrain(model, dataLoader, optimizer, criterion, device, scaler):
         model.train()
+        
         totalLoss = 0.0
-        count = 0
+        allPreds = []
+        allTargets = []
         
-        start_time = time.time()
+        # Get amp settings
+        amp_dtype = getattr(ChexnetTrainer, '_amp_dtype', torch.float16)
+        has_tensor_cores = getattr(ChexnetTrainer, '_has_tensor_cores', False)
         
-        pbar = tqdm(dataLoader, desc=f"🔥 Training Epoch {epoch_num}", 
-                   unit="batch", dynamic_ncols=True)
+        pbar = tqdm(dataLoader, desc="Training", ncols=100)
         
         for batch_idx, (input, target) in enumerate(pbar):
-            non_blocking = torch.cuda.is_available()
-            input = input.to(device, non_blocking=non_blocking)
-            target = target.to(device, non_blocking=non_blocking)
+            input = input.to(device, non_blocking=True)
+            target = target.to(device, non_blocking=True)
             
-            output = model(input)
-            loss = criterion(output, target)
+            # Convert to channels_last for Tensor Core optimization
+            if has_tensor_cores:
+                input = input.to(memory_format=torch.channels_last)
             
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            totalLoss += loss.item()
-            count += 1
-            
-            # Real-time loss display
-            avg_loss = totalLoss / count
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'avg_loss': f'{avg_loss:.4f}'
-            })
-        
-        elapsed_time = time.time() - start_time
-        return totalLoss / count if count > 0 else float("inf"), elapsed_time
-
-    @staticmethod
-    def epochVal(model, dataLoader, criterion, device, epoch_num):
-        """Validation epoch with real-time loss display"""
-        model.eval()
-        totalLoss = 0.0
-        count = 0
-        
-        start_time = time.time()
-        
-        pbar = tqdm(dataLoader, desc=f"✅ Validation Epoch {epoch_num}", 
-                   unit="batch", dynamic_ncols=True)
-        
-        with torch.no_grad():
-            for input, target in pbar:
-                non_blocking = torch.cuda.is_available()
-                input = input.to(device, non_blocking=non_blocking)
-                target = target.to(device, non_blocking=non_blocking)
-                
+            # Mixed precision training with appropriate dtype
+            with torch.amp.autocast('cuda', dtype=amp_dtype):
                 output = model(input)
                 loss = criterion(output, target)
-                
-                totalLoss += loss.item()
-                count += 1
-                
-                # Real-time loss display
-                avg_loss = totalLoss / count
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'avg_loss': f'{avg_loss:.4f}'
-                })
+            
+            optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+            
+            if amp_dtype == torch.bfloat16:
+                # No scaling needed for bfloat16
+                loss.backward()
+                optimizer.step()
+            else:
+                # Use gradient scaling for float16
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            
+            # Metrics
+            totalLoss += loss.item()
+            allPreds.append(torch.sigmoid(output).detach().cpu())
+            allTargets.append(target.detach().cpu())
+            
+            # Progress
+            avgLoss = totalLoss / (batch_idx + 1)
+            pbar.set_postfix({
+                'loss': f'{avgLoss:.4f}',
+                'lr': f'{optimizer.param_groups[0]["lr"]:.6f}'
+            })
         
-        elapsed_time = time.time() - start_time
-        return totalLoss / count if count > 0 else float("inf"), elapsed_time
+        # Compute metrics
+        allPreds = torch.cat(allPreds, dim=0).numpy()
+        allTargets = torch.cat(allTargets, dim=0).numpy()
+        
+        auroc = ChexnetTrainer.computeAUROC_mean(allTargets, allPreds)
+        acc = ChexnetTrainer.computeAccuracy(allTargets, allPreds)
+        
+        return totalLoss / len(dataLoader), auroc, acc
 
     @staticmethod
-    def computeAUROC(dataGT, dataPRED, classCount):
-        outAUROC = []
-        datanpGT = dataGT.cpu().numpy()
-        datanpPRED = dataPRED.cpu().numpy()
+    def epochVal(model, dataLoader, criterion, device):
+        model.eval()
+        
+        totalLoss = 0.0
+        allPreds = []
+        allTargets = []
+        
+        # Get amp settings
+        amp_dtype = getattr(ChexnetTrainer, '_amp_dtype', torch.float16)
+        has_tensor_cores = getattr(ChexnetTrainer, '_has_tensor_cores', False)
+        
+        pbar = tqdm(dataLoader, desc="Validation", ncols=100)
+        
+        with torch.no_grad():
+            for batch_idx, (input, target) in enumerate(pbar):
+                input = input.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                
+                # Convert to channels_last for Tensor Core optimization
+                if has_tensor_cores:
+                    input = input.to(memory_format=torch.channels_last)
+                
+                # Use same dtype as training
+                with torch.amp.autocast('cuda', dtype=amp_dtype):
+                    output = model(input)
+                    loss = criterion(output, target)
+                
+                totalLoss += loss.item()
+                allPreds.append(torch.sigmoid(output).cpu())
+                allTargets.append(target.cpu())
+                
+                avgLoss = totalLoss / (batch_idx + 1)
+                pbar.set_postfix({'loss': f'{avgLoss:.4f}'})
+        
+        # Compute metrics
+        allPreds = torch.cat(allPreds, dim=0).numpy()
+        allTargets = torch.cat(allTargets, dim=0).numpy()
+        
+        auroc = ChexnetTrainer.computeAUROC_mean(allTargets, allPreds)
+        acc = ChexnetTrainer.computeAccuracy(allTargets, allPreds)
+        
+        return totalLoss / len(dataLoader), auroc, acc
+
+    @staticmethod
+    def computeAUROC_mean(dataGT, dataPRED):
+        """Compute mean AUROC across all classes"""
+        classCount = dataGT.shape[1]
+        aurocIndividual = []
+        
         for i in range(classCount):
             try:
-                outAUROC.append(roc_auc_score(datanpGT[:, i], datanpPRED[:, i]))
+                auroc = roc_auc_score(dataGT[:, i], dataPRED[:, i])
+                aurocIndividual.append(auroc)
             except:
-                outAUROC.append(float("nan"))
-        return outAUROC
+                aurocIndividual.append(np.nan)
+        
+        return np.nanmean(aurocIndividual)
+
+    @staticmethod
+    def computeAccuracy(dataGT, dataPRED, threshold=0.5):
+        """Compute multi-label accuracy"""
+        predBinary = (dataPRED >= threshold).astype(int)
+        acc = accuracy_score(dataGT.flatten(), predBinary.flatten())
+        return acc
 
     @staticmethod
     def test(pathDirData, pathFileTest, pathModel,
              nnClassCount, trBatchSize, transCrop,
-             device=None, model_type=None):
-        """Enhanced testing with multi-model support"""
-        
-        CLASS_NAMES = ['Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
-                       'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax',
-                       'Consolidation', 'Edema', 'Emphysema', 'Fibrosis',
-                       'Pleural_Thickening', 'Hernia', 'No Finding']
+             device=None):
         
         print("\n" + "="*80)
-        print("🔍 STARTING TESTING")
+        print("Testing ChestX-ray14 Model")
         print("="*80)
         
-        # Detect device
-        if device is None:
-            device, gpu_count, gpu_info = ChexnetTrainer.detect_gpus()
+        device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Load checkpoint
-        print(f"\n📂 Loading checkpoint: {pathModel}")
-        ckpt = torch.load(pathModel, map_location=device)
+        # Load model
+        model = ConvNeXtV2Model(num_classes=nnClassCount, pretrained=False).to(device)
         
-        if model_type is None:
-            model_type = ckpt.get('model_type', 'densenet121')
-            print(f"   Auto-detected model type: {model_type}")
-        
-        # Create model
-        print(f"\n📦 Creating {model_type} model...")
-        model = MultiModelArchitecture(model_type, nnClassCount, isTrained=False).to(device)
-        
-        # Load weights
+        print(f"\nLoading model: {pathModel}")
+        ckpt = torch.load(pathModel, map_location=device,weights_only=False)
         state_dict = ckpt['state_dict']
+        
         try:
             model.load_state_dict(state_dict)
         except Exception:
             if any(k.startswith('module.') for k in state_dict.keys()):
-                stripped = OrderedDict((k[7:], v) if k.startswith('module.') else (k, v)
-                                       for k, v in state_dict.items())
+                stripped = OrderedDict(
+                    (k[7:], v) if k.startswith('module.') else (k, v)
+                    for k, v in state_dict.items()
+                )
                 model.load_state_dict(stripped)
-            else:
-                raise
         
         model.eval()
         
@@ -364,68 +456,69 @@ class ChexnetTrainer:
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                          [0.229, 0.224, 0.225])
         transformTest = transforms.Compose([
-            transforms.Resize(256),
+            transforms.Resize(int(transCrop * 1.14)),
             transforms.CenterCrop(transCrop),
             transforms.ToTensor(),
             normalize
         ])
         
         # Dataset
-        print(f"\n📚 Loading test dataset...")
         datasetTest = DatasetGenerator(pathDirData, pathFileTest, transformTest)
-        print(f"   Test samples: {len(datasetTest)}")
-        
-        use_cuda = torch.cuda.is_available()
-        num_workers = min(8, os.cpu_count() or 2) if use_cuda else 0
-        
         dataLoaderTest = DataLoader(
-            datasetTest, batch_size=trBatchSize,
-            shuffle=False, num_workers=num_workers, 
-            pin_memory=use_cuda
+            datasetTest,
+            batch_size=trBatchSize,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True
         )
         
-        # Testing
-        print("\n🧪 Running inference...")
-        outGT = torch.FloatTensor().to(device)
-        outPRED = torch.FloatTensor().to(device)
+        print(f"Test samples: {len(datasetTest)}")
         
+        # Inference
+        allPreds = []
+        allTargets = []
+        
+        print("\nRunning inference...")
         with torch.no_grad():
-            for input, target in tqdm(dataLoaderTest, desc="Testing", unit="batch"):
-                non_blocking = torch.cuda.is_available()
-                input = input.to(device, non_blocking=non_blocking)
-                target = target.to(device, non_blocking=non_blocking)
-                out = model(input)
-                outGT = torch.cat((outGT, target), 0)
-                outPRED = torch.cat((outPRED, out), 0)
+            for input, target in tqdm(dataLoaderTest, desc="Testing"):
+                input = input.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                
+                output = model(input)
+                pred = torch.sigmoid(output)
+                
+                allPreds.append(pred.cpu())
+                allTargets.append(target.cpu())
         
-        # Compute AUROC
-        print("\n📊 Computing AUROC scores...")
-        aurocIndividual = ChexnetTrainer.computeAUROC(outGT, outPRED, nnClassCount)
+        allPreds = torch.cat(allPreds, dim=0).numpy()
+        allTargets = torch.cat(allTargets, dim=0).numpy()
+        
+        # Compute AUROC per class
+        aurocIndividual = []
+        for i in range(nnClassCount):
+            try:
+                auroc = roc_auc_score(allTargets[:, i], allPreds[:, i])
+                aurocIndividual.append(auroc)
+            except:
+                aurocIndividual.append(np.nan)
+        
         aurocMean = np.nanmean(aurocIndividual)
         
+        # Print results
         print("\n" + "="*80)
-        print("📊 TEST RESULTS")
+        print("Test Results")
         print("="*80)
-        print(f"\n🏆 Mean AUROC: {aurocMean:.4f}\n")
-        print("Per-class AUROC:")
+        print(f"\nMean AUROC: {aurocMean:.4f}\n")
+        print(f"{'Disease':<25} {'AUROC':<10}")
         print("-" * 40)
-        for i, name in enumerate(CLASS_NAMES[:nnClassCount]):
-            score = aurocIndividual[i]
-            emoji = "✅" if score > 0.7 else "⚠️" if score > 0.6 else "❌"
-            print(f"  {emoji} {name:20s}: {score:.4f}")
-        print("="*80 + "\n")
         
-        return aurocMean, aurocIndividual
-    
-    @staticmethod
-    def _format_time(seconds):
-        """Format seconds to human readable time"""
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        if hours > 0:
-            return f"{hours}h {minutes}m {secs}s"
-        elif minutes > 0:
-            return f"{minutes}m {secs}s"
-        else:
-            return f"{secs}s"
+        for i, name in enumerate(ChexnetTrainer.CLASS_NAMES[:nnClassCount]):
+            auroc_val = aurocIndividual[i]
+            if not np.isnan(auroc_val):
+                print(f"{name:<25} {auroc_val:<10.4f}")
+            else:
+                print(f"{name:<25} {'N/A':<10}")
+        
+        print("="*80)
+        
+        return aurocMean, aurocIndividual, allPreds, allTargets
