@@ -1,4 +1,4 @@
-# main.py - Optimized entry point (Merged DDP features)
+# main.py - Optimized entry point
 import os
 import torch
 from Models.TrainModel import ChexnetTrainer
@@ -7,8 +7,7 @@ def main():
     """Main entry point with enhanced configuration"""
     print("\n" + "="*80)
     print("ChestX-ray14 Classification - ConvNeXtV2-Large")
-    # === [SỬA] === Tiêu đề từ Đoạn 1
-    print("Multi-GPU Optimized | DistributedDataParallel | Progressive Fine-tuning")
+    print("Multi-GPU Optimized | Tensor Core Accelerated")
     print("="*80 + "\n")
     
     # Choose mode
@@ -45,26 +44,21 @@ def runTrain():
         TensorCoreConfig.print_config(config)
         
         # Ask user to confirm or customize
-        use_optimal = input("\nUse recommended settings? [Y/n]: ").strip().lower()
+        use_optimal = input("\nUse recommended settings? [y/n]: ").strip().lower()
         
-        # === [SỬA] === Logic Batch Size từ Đoạn 1 (PER GPU)
-        if use_optimal != 'n':
-            # Batch size PER GPU (not total)
-            trBatchSize = config['batch_size']
-            num_gpus = max(1, torch.cuda.device_count())
+        if use_optimal == 'y':
+            trBatchSize = config['batch_size'] * max(1, torch.cuda.device_count())
+            num_workers = config['num_workers']
             use_compile = config.get('use_compile', False)
-            
-            print(f"\n✓ Batch size per GPU: {trBatchSize}")
-            print(f"✓ Number of GPUs: {num_gpus}")
-            print(f"✓ Effective batch size: {trBatchSize * num_gpus}")
+            print(f"\n✓ Using optimal batch size: {trBatchSize} (total across {torch.cuda.device_count()} GPUs)")
+            print(f"✓ Num workers: {num_workers}")
             print(f"✓ Image size: {imgtransCrop}x{imgtransCrop}")
             if use_compile:
-               print(f"✓ torch.compile: Enabled (20-30% speedup expected)")
+                print(f"✓ torch.compile: Enabled (20-30% speedup expected)")
         else:
-            trBatchSize = int(input("Enter batch size PER GPU: "))
+            trBatchSize = int(input("Enter total batch size: "))
             imgtransCrop = int(input(f"Enter image size [current: {imgtransCrop}]: ") or imgtransCrop)
             use_compile = input("Use torch.compile? [y/n]: ").strip().lower() == 'y'
-        # === [HẾT SỬA] ===
             
     except ImportError:
         # Fallback if config module not available
@@ -76,14 +70,7 @@ def runTrain():
     # ---- Advanced options
     print("\n⚙️ Advanced options:")
     use_class_weights = input("  Use class weights for imbalanced data? [Y/n]: ").strip().lower() != 'n'
-    
-    # === [SỬA] === Logic Tinh chỉnh từ Đoạn 1
-    print("\n🔧 Progressive Fine-tuning Strategy:")
-    print("  Phase 1 (Epoch 0-N): Train ONLY classifier (backbone frozen)")
-    print("  Phase 2 (Epoch N+): Unfreeze backbone, fine-tune entire model with lower LR")
-    fine_tune_epoch = int(input("  Unfreeze backbone at epoch [30]: ").strip() or "30")
-    
-    # Giữ lại tùy chọn 'use_preload' từ Đoạn 2
+    fine_tune_epoch = int(input("  Unfreeze backbone at epoch [default: 30]: ").strip() or "30")
     use_preload = input("  Preload all images to RAM? (faster but needs ~50GB RAM) [y/N]: ").strip().lower() == 'y'
     
     # ---- Paths
@@ -101,29 +88,21 @@ def runTrain():
     
     print(f"\n📋 Final Configuration:")
     print(f"  Classes: {nnClassCount}")
-    # === [SỬA] === Cập nhật in thông tin batch size
-    print(f"  Batch size per GPU: {trBatchSize}")
-    print(f"  Total GPUs: {torch.cuda.device_count()}")
-    print(f"  Effective batch size: {trBatchSize * max(1, torch.cuda.device_count())}")
-    # === [HẾT SỬA] ===
+    print(f"  Batch size: {trBatchSize}")
     print(f"  Max epochs: {trMaxEpoch}")
     print(f"  Image size: {imgtransCrop}x{imgtransCrop}")
     print(f"  Pretrained: {nnIsTrained}")
     print(f"  Class weights: {use_class_weights}")
-    print(f"  Fine-tuning strategy:")
-    print(f"    - Phase 1 (0-{fine_tune_epoch}): Classifier only")
-    print(f"    - Phase 2 ({fine_tune_epoch}+): Full model (backbone LR: 5e-5, classifier LR: 1e-4)")
+    print(f"  Fine-tune at epoch: {fine_tune_epoch}")
     print(f"  torch.compile: {use_compile}")
-    print(f"  Preload images: {use_preload}") # Giữ lại từ Đoạn 2
+    print(f"  Preload images: {use_preload}")
     
     # Estimate training time
     try:
         from Models.config import estimate_training_time
         time_hours, breakdown = estimate_training_time(
             dataset_size=86524,  # Approximate
-            # === [SỬA] === Tính effective batch size
-            batch_size=trBatchSize * max(1, torch.cuda.device_count()),
-            # === [HẾT SỬA] ===
+            batch_size=trBatchSize,
             epochs=trMaxEpoch,
             architecture=config.get('architecture'),
             dtype=config.get('dtype')
@@ -139,21 +118,11 @@ def runTrain():
         print("Training cancelled.")
         return
     
+    # Train
     print("\n" + "="*80)
     print("🚀 STARTING TRAINING")
     print("="*80)
-
-    # === [THÊM] === Hướng dẫn Đa GPU (DDP) từ Đoạn 1
-    num_gpus = torch.cuda.device_count()
-    if num_gpus > 1:
-        print(f"\n💡 TIP: For multi-GPU training, use:")
-        print(f"   torchrun --nproc_per_node={num_gpus} main.py")
-        print(f"\nOr set environment variables manually:")
-        print(f"   RANK=0 WORLD_SIZE={num_gpus} LOCAL_RANK=0 python main.py")
-        print("\nContinuing with single-process mode...")
-    # === [HẾT THÊM] ===
     
-    # Train
     ChexnetTrainer.train(
         pathDirData, pathFileTrain, pathFileVal,
         nnIsTrained, nnClassCount,
@@ -175,19 +144,18 @@ def runTrain():
     if test_now == 'y':
         runTest(pathModel=pathModel, image_size=imgtransCrop)
 
-# === [THAY THẾ] === Toàn bộ hàm runResume từ Đoạn 1
 def runResume():
     """Resume training from checkpoint"""
     print("\n[MODE] Resume training from checkpoint")
     
-    # Model path
+    # ---- Model path
     pathModel = input("Checkpoint path [CheXNet/Trainedmodel/chexnetmodel.pth]: ").strip() or 'CheXNet/Trainedmodel/chexnetmodel.pth'
     
     if not os.path.exists(pathModel):
         print(f"\n❌ Checkpoint not found: {pathModel}")
         return
     
-    # Load checkpoint info
+    # Load checkpoint to get info
     ckpt = torch.load(pathModel, map_location='cpu', weights_only=False)
     start_epoch = ckpt.get('epoch', 0)
     best_auroc = ckpt.get('best_auroc', 0.0)
@@ -198,45 +166,32 @@ def runResume():
     print(f"  Best AUROC: {best_auroc:.4f}")
     print(f"  Image size: {config.get('image_size', 'unknown')}")
     print(f"  Num classes: {config.get('num_classes', 'unknown')}")
-    print(f"  Fine-tune epoch: {config.get('fine_tune_epoch', 30)}")
     
-    # Paths
+    # ---- Paths
     pathDirData = input("\nImage directory [CheXNet/Database]: ").strip() or 'CheXNet/Database'
     pathFileTrain = input("Train list [CheXNet/Dataset/train_list.txt]: ").strip() or 'CheXNet/Dataset/train_list.txt'
     pathFileVal = input("Val list [CheXNet/Dataset/val_list.txt]: ").strip() or 'CheXNet/Dataset/val_list.txt'
     
-    # Hyperparameters
+    # ---- Hyperparameters
     nnIsTrained = True
     nnClassCount = config.get('num_classes', 15)
     imgtransCrop = config.get('image_size', 384)
     trMaxEpoch = int(input(f"Continue until epoch [100]: ").strip() or "100")
     
-    # Batch size - NOW CONFIGURABLE (Logic từ Đoạn 1)
+    # Get batch size
     try:
         from Models.config import TensorCoreConfig
         auto_config = TensorCoreConfig.get_optimal_config(image_size=imgtransCrop)
-        suggested_batch = auto_config['batch_size']
-        print(f"\n💡 Suggested batch size per GPU: {suggested_batch}")
+        trBatchSize = auto_config['batch_size'] * max(1, torch.cuda.device_count())
     except:
-        suggested_batch = 16
+        trBatchSize = 16
     
-    trBatchSize = int(input(f"Batch size per GPU [{suggested_batch}]: ").strip() or str(suggested_batch))
-    
-    # Advanced options (Logic linh hoạt từ Đoạn 1)
+    # Advanced options
     use_class_weights = input("\nUse class weights? [Y/n]: ").strip().lower() != 'n'
-    fine_tune_epoch = config.get('fine_tune_epoch', 30)
-    
-    print(f"\n  Progressive fine-tuning at epoch: {fine_tune_epoch}")
-    change_fine_tune = input("  Change fine-tune epoch? [y/N]: ").strip().lower() == 'y'
-    if change_fine_tune:
-        fine_tune_epoch = int(input(f"  Unfreeze backbone at epoch [{fine_tune_epoch}]: ").strip() or str(fine_tune_epoch))
-    
-    use_compile = input("  Use torch.compile? [Y/n]: ").strip().lower() != 'n'
+    fine_tune_epoch = int(input("Fine-tune epoch [30]: ").strip() or "30")
+    use_compile = input("Use torch.compile? [y/N]: ").strip().lower() == 'y'
     
     print(f"\n▶️ Resuming from epoch {start_epoch}...")
-    print(f"  Batch size per GPU: {trBatchSize}")
-    print(f"  Total GPUs: {torch.cuda.device_count()}")
-    print(f"  Fine-tune epoch: {fine_tune_epoch}")
     
     # Resume training
     ChexnetTrainer.train(
@@ -253,12 +208,11 @@ def runResume():
     
     print("\n✅ Training resumed and completed!")
 
-# === [THAY THẾ] === Toàn bộ hàm runTest từ Đoạn 1
 def runTest(pathModel=None, image_size=None):
-    """Test trained model with configurable batch size"""
+    """Test trained model with optional TTA"""
     print("\n[MODE] Testing")
     
-    # Paths
+    # ---- Paths
     pathDirData = input("Image directory [CheXNet/Database]: ").strip() or 'CheXNet/Database'
     pathFileTest = input("Test list [CheXNet/Dataset/test_list.txt]: ").strip() or 'CheXNet/Dataset/test_list.txt'
     
@@ -274,23 +228,14 @@ def runTest(pathModel=None, image_size=None):
     ckpt = torch.load(pathModel, map_location='cpu', weights_only=False)
     config = ckpt.get('config', {})
     
-    # Parameters
+    # ---- Parameters
     nnClassCount = config.get('num_classes', 15)
     if image_size is None:
         imgtransCrop = config.get('image_size', 384)
     else:
         imgtransCrop = image_size
     
-    # Batch size - NOW CONFIGURABLE (Logic từ Đoạn 1)
-    try:
-        from Models.config import TensorCoreConfig
-        auto_config = TensorCoreConfig.get_optimal_config(image_size=imgtransCrop)
-        suggested_batch = auto_config['batch_size'] * 2  # Can use larger batch for inference
-        print(f"\n💡 Suggested test batch size: {suggested_batch}")
-    except:
-        suggested_batch = 32
-    
-    trBatchSize = int(input(f"Batch size [{suggested_batch}]: ").strip() or str(suggested_batch))
+    trBatchSize = int(input(f"Batch size [32]: ").strip() or "32")
     
     # Test-Time Augmentation
     use_tta = input("\nUse Test-Time Augmentation (TTA)? [y/N]: ").strip().lower() == 'y'
@@ -301,7 +246,6 @@ def runTest(pathModel=None, image_size=None):
     
     print(f"\n🔍 Testing model: {pathModel}")
     print(f"   Image size: {imgtransCrop}x{imgtransCrop}")
-    print(f"   Batch size: {trBatchSize}")
     print(f"   TTA: {'Enabled' if use_tta else 'Disabled'}")
     
     # Test
@@ -321,14 +265,12 @@ def runTest(pathModel=None, image_size=None):
             os.makedirs(save_dir, exist_ok=True)
             
             print(f"\n📈 Generating visualizations...")
-            plot_results(
-                allTargets, allPreds, aurocIndividual,
-                ChexnetTrainer.CLASS_NAMES[:nnClassCount],
-                save_dir=save_dir
-            )
+            plot_results(allTargets, allPreds, aurocIndividual, 
+                        ChexnetTrainer.CLASS_NAMES[:nnClassCount],
+                        save_dir=save_dir)
             print(f"✓ Plots saved to: {save_dir}")
     except ImportError:
-        print("⚠ Visualization module not found.")
+        print("⚠ Visualization module not found. Skipping plots.")
     except Exception as e:
         print(f"⚠ Error generating plots: {e}")
     
@@ -345,7 +287,7 @@ def runTest(pathModel=None, image_size=None):
             if os.path.exists(sample_image):
                 print(f"\n🔥 Generating heatmaps for: {sample_image}")
                 generate_multi_class_heatmap(
-                    pathModel, sample_image,
+                    pathModel, sample_image, 
                     ChexnetTrainer.CLASS_NAMES[:nnClassCount],
                     num_classes=nnClassCount,
                     image_size=imgtransCrop,
@@ -365,7 +307,6 @@ def runTest(pathModel=None, image_size=None):
     if use_tta:
         print(f"   (with {num_tta} Test-Time Augmentations)")
     print("="*80)
-# === [HẾT THAY THẾ] ===
 
 if __name__ == '__main__':
     try:
