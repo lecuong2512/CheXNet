@@ -1,4 +1,4 @@
-# read_data.py - Optimized dataset loader with caching and preprocessing
+# read_data.py - Optimized dataset loader with CSV support
 import os
 import torch
 from torch.utils.data import Dataset
@@ -10,11 +10,12 @@ from pathlib import Path
 import io
 from concurrent.futures import ThreadPoolExecutor
 import warnings
+import pandas as pd
 
 class DatasetGenerator(Dataset):
     """
     Optimized dataset for NIH ChestX-ray14 multi-label classification
-    with image caching and efficient loading
+    with CSV file support and image caching
     """
     def __init__(self, 
                  pathImageDirectory: str, 
@@ -26,7 +27,7 @@ class DatasetGenerator(Dataset):
         """
         Args:
             pathImageDirectory: Root directory containing images
-            pathDatasetFile: Path to dataset list file
+            pathDatasetFile: Path to CSV or TXT dataset file
             transform: Image transformations
             cache_images: Cache decoded images in memory (needs sufficient RAM)
             preload_images: Preload all images at initialization (very fast training)
@@ -37,11 +38,11 @@ class DatasetGenerator(Dataset):
         self.cache_images = cache_images
         self.image_cache = {} if cache_images else None
 
-        # Load dataset file
-        print(f"📂 Loading dataset from: {pathDatasetFile}")
+        # Load dataset file (auto-detect CSV or TXT format)
+        print(f"Loading dataset from: {pathDatasetFile}")
         self.listImagePaths, self.listImageLabels = self._load_dataset_file(pathDatasetFile)
         
-        print(f"✓ Loaded {len(self.listImagePaths)} images")
+        print(f"Loaded {len(self.listImagePaths)} images")
         
         # Preload images if requested
         if preload_images:
@@ -51,7 +52,82 @@ class DatasetGenerator(Dataset):
         self._compute_statistics()
 
     def _load_dataset_file(self, pathDatasetFile: str) -> Tuple[List[str], List[torch.Tensor]]:
-        """Load and parse dataset file efficiently"""
+        """Load and parse dataset file (CSV or TXT format)"""
+        
+        # Check file extension
+        file_ext = os.path.splitext(pathDatasetFile)[1].lower()
+        
+        if file_ext == '.csv':
+            return self._load_csv_file(pathDatasetFile)
+        else:
+            return self._load_txt_file(pathDatasetFile)
+    
+    def _load_csv_file(self, pathDatasetFile: str) -> Tuple[List[str], List[torch.Tensor]]:
+        """
+        Load CSV file with format:
+        Image Index, Finding Labels, Patient ID, Source, No Finding, Atelectasis, Cardiomegaly, ...
+        """
+        print("Loading CSV format...")
+        
+        # Read CSV
+        df = pd.read_csv(pathDatasetFile)
+        
+        # Remove whitespace from column names
+        df.columns = df.columns.str.strip()
+        
+        # Expected disease columns (14 diseases + No Finding)
+        disease_columns = [
+            'No Finding', 'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
+            'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Consolidation',
+            'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
+        ]
+        
+        # Check if disease columns exist
+        missing_cols = [col for col in disease_columns if col not in df.columns]
+        if missing_cols:
+            print(f"Missing columns: {missing_cols}")
+            # Add missing columns as 0
+            for col in missing_cols:
+                df[col] = 0
+        
+        image_paths = []
+        image_labels = []
+        
+        print(f"Processing {len(df)} rows from CSV...")
+        
+        for idx, row in df.iterrows():
+            # Get image path from 'Image Index' column
+            if 'Image Index' in df.columns:
+                image_path = str(row['Image Index']).strip()
+            else:
+                print("Image Index' column not found!")
+                raise ValueError("CSV must have 'Image Index' column")
+            
+            # Extract labels for 15 classes (in order)
+            labels = []
+            for disease in disease_columns:
+                if disease in df.columns:
+                    # Convert to 0 or 1
+                    label_val = int(row[disease]) if pd.notna(row[disease]) else 0
+                    labels.append(label_val)
+                else:
+                    labels.append(0)
+            
+            image_paths.append(image_path)
+            image_labels.append(torch.tensor(labels, dtype=torch.float32))
+        
+        print(f"Loaded {len(image_paths)} images from CSV")
+        print(f"   Label columns: {disease_columns}")
+        
+        return image_paths, image_labels
+    
+    def _load_txt_file(self, pathDatasetFile: str) -> Tuple[List[str], List[torch.Tensor]]:
+        """
+        Load TXT file with format:
+        image_path label1 label2 label3 ... label15
+        """
+        print("Loading TXT format...")
+        
         image_paths = []
         image_labels = []
         
@@ -67,7 +143,13 @@ class DatasetGenerator(Dataset):
             imagePath = items[0]
             
             # Labels: 14 diseases + 1 "No Finding"
-            imageLabel = torch.tensor([int(x) for x in items[1:]], dtype=torch.float32)
+            if len(items) >= 16:  # image_path + 15 labels
+                imageLabel = torch.tensor([int(x) for x in items[1:16]], dtype=torch.float32)
+            else:
+                # Fallback: pad with zeros if not enough labels
+                labels = [int(x) for x in items[1:]]
+                labels += [0] * (15 - len(labels))
+                imageLabel = torch.tensor(labels, dtype=torch.float32)
             
             image_paths.append(imagePath)
             image_labels.append(imageLabel)
@@ -76,7 +158,7 @@ class DatasetGenerator(Dataset):
 
     def _preload_all_images(self, num_workers: int = 4):
         """Preload all images into memory for fastest training"""
-        print(f"\n⚡ Preloading all images with {num_workers} workers...")
+        print(f"Preloading all images with {num_workers} workers...")
         print("   This may take a few minutes but will greatly speed up training...")
         
         from tqdm import tqdm
@@ -104,7 +186,7 @@ class DatasetGenerator(Dataset):
             if image is not None:
                 self.image_cache[idx] = image
         
-        print(f"✓ Preloaded {len(self.image_cache)}/{len(self)} images into memory")
+        print(f"Preloaded {len(self.image_cache)}/{len(self)} images into memory")
         
         # Estimate memory usage
         if self.image_cache:
@@ -178,14 +260,23 @@ class DatasetGenerator(Dataset):
     def print_statistics(self):
         """Print dataset statistics"""
         print("\n" + "="*60)
-        print("📊 Dataset Statistics")
+        print("Dataset Statistics")
         print("="*60)
         print(f"Total samples: {len(self)}")
         print(f"Average labels per image: {self.avg_labels_per_image:.2f}")
         print(f"Label range: [{self.min_labels_per_image:.0f}, {self.max_labels_per_image:.0f}]")
         print(f"\nClass distribution:")
+        
+        # Class names
+        class_names = [
+            'No Finding', 'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
+            'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Consolidation',
+            'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
+        ]
+        
         for i, (count, freq) in enumerate(zip(self.class_counts, self.class_frequencies)):
-            print(f"  Class {i:2d}: {count:6.0f} samples ({freq*100:5.2f}%)")
+            class_name = class_names[i] if i < len(class_names) else f"Class {i}"
+            print(f"  {class_name:20s}: {count:6.0f} samples ({freq*100:5.2f}%)")
         print("="*60 + "\n")
 
 
@@ -337,7 +428,7 @@ if __name__ == '__main__':
     
     # Test configuration
     pathDirData = 'CheXNet/Database'
-    pathFileTrain = 'CheXNet/Dataset/train_list.txt'
+    pathFileCSV = 'CheXNet/Dataset/train_data.csv'  # CSV file
     
     # Create transforms
     normalize = transforms.Normalize([0.485, 0.456, 0.406],
@@ -350,11 +441,11 @@ if __name__ == '__main__':
         normalize
     ])
     
-    # Test dataset loading
-    print("Testing dataset loading...")
+    # Test dataset loading with CSV
+    print("Testing CSV dataset loading...")
     dataset = DatasetGenerator(
         pathDirData, 
-        pathFileTrain, 
+        pathFileCSV, 
         transform,
         cache_images=False,
         preload_images=False
@@ -379,4 +470,4 @@ if __name__ == '__main__':
         if batch_idx >= 2:
             break
     
-    print("\n✓ All tests passed!")
+    print("\nâœ… All tests passed!")
