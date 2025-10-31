@@ -264,7 +264,7 @@ class ChexnetTrainer:
 
         # ---- Mixed Precision Training
         use_amp = torch.cuda.is_available()
-        scaler = torch.cuda.amp.GradScaler(enabled=(amp_dtype == torch.float16))
+        scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16))
         
         if use_amp:
             dtype_name = "bfloat16" if amp_dtype == torch.bfloat16 else "float16"
