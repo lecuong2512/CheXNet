@@ -1,4 +1,4 @@
-# TrainModel.py - Optimized training with fine-tuning, class weighting, and TTA
+# TrainModel.py - Optimized training with fine-tuning and class weighting
 import os
 import time
 from tqdm import tqdm
@@ -16,18 +16,18 @@ import warnings
 
 try:
     from Models.Model import ConvNeXtV2Model
-    from Models.read_data import DatasetGenerator, FastDataLoader, create_tta_transforms
+    from Models.read_data import DatasetGenerator, FastDataLoader
 except ImportError:
     from Model import ConvNeXtV2Model
-    from read_data import DatasetGenerator, FastDataLoader, create_tta_transforms
+    from read_data import DatasetGenerator, FastDataLoader
 
 
 class ChexnetTrainer:
     CLASS_NAMES = [
-        'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
+        'No Finding', 'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
         'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax',
         'Consolidation', 'Edema', 'Emphysema', 'Fibrosis',
-        'Pleural_Thickening', 'Hernia', 'No Finding'
+        'Pleural_Thickening', 'Hernia'
     ]
 
     @staticmethod
@@ -590,150 +590,236 @@ class ChexnetTrainer:
              nnClassCount: int, 
              trBatchSize: int, 
              transCrop: int,
-             device: Optional[torch.device] = None,
-             use_tta: bool = False,
-             num_tta: int = 5):
+             device: Optional[torch.device] = None):
         """
-        Test trained model with optional Test-Time Augmentation (TTA)
+        Test trained model on test set
         
         Args:
-            use_tta: Enable test-time augmentation for better results
-            num_tta: Number of TTA augmentations
+            pathDirData: Root directory of images
+            pathFileTest: Path to test CSV file
+            pathModel: Path to trained model checkpoint
+            nnClassCount: Number of classes
+            trBatchSize: Batch size for inference
+            transCrop: Image crop size
+            device: PyTorch device (auto-detect if None)
+            
+        Returns:
+            tuple: (mean_auroc, individual_aurocs, predictions, targets)
         """
         
         print("\n" + "="*80)
         print("Testing ChestX-ray14 Model")
-        if use_tta:
-            print(f"🔄 Test-Time Augmentation: {num_tta} augmentations")
         print("="*80)
         
-        device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Setup device
+        if device is None:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Load model
+        print(f"\nDevice: {device}")
+        if torch.cuda.is_available():
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
+            print(f"Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        
+        # ---- Load Model
+        print(f"\n📥 Loading model from: {pathModel}")
+        
         model = ConvNeXtV2Model(num_classes=nnClassCount, pretrained=False).to(device)
         
-        print(f"\n📥 Loading model: {pathModel}")
-        ckpt = torch.load(pathModel, map_location=device, weights_only=False)
-        state_dict = ckpt['state_dict']
+        if not os.path.exists(pathModel):
+            raise FileNotFoundError(f"Model file not found: {pathModel}")
         
         try:
-            model.load_state_dict(state_dict)
-        except Exception:
-            if any(k.startswith('module.') for k in state_dict.keys()):
-                stripped = OrderedDict(
+            ckpt = torch.load(pathModel, map_location=device, weights_only=False)
+            state_dict = ckpt.get('state_dict', ckpt)  # Handle both formats
+            
+            # Handle torch.compile() prefix (_orig_mod.)
+            if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+                print("  ⚙️ Detected torch.compile() checkpoint, removing '_orig_mod.' prefix...")
+                state_dict = OrderedDict(
+                    (k.replace('_orig_mod.', ''), v)
+                    for k, v in state_dict.items()
+                )
+            
+            # Handle DataParallel prefix (module.)
+            elif any(k.startswith('module.') for k in state_dict.keys()):
+                print("  ⚙️ Detected DataParallel checkpoint, removing 'module.' prefix...")
+                state_dict = OrderedDict(
                     (k[7:], v) if k.startswith('module.') else (k, v)
                     for k, v in state_dict.items()
                 )
-                model.load_state_dict(stripped)
+            
+            model.load_state_dict(state_dict)
+            print("✓ Model loaded successfully")
+            
+            # Print checkpoint info if available
+            if 'best_auroc' in ckpt:
+                print(f"  Checkpoint AUROC: {ckpt['best_auroc']:.4f}")
+            if 'epoch' in ckpt:
+                print(f"  Trained epochs: {ckpt['epoch']}")
+                
+        except Exception as e:
+            print(f"❌ Error loading model: {e}")
+            raise
         
         model.eval()
         
-        # Data transforms
+        # ---- Data Transform (same as validation)
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                          [0.229, 0.224, 0.225])
         
-        if use_tta:
-            # Create TTA transforms
-            tta_transforms = create_tta_transforms(None, transCrop)
-            print(f"✓ Created {len(tta_transforms)} TTA transforms")
-        else:
-            transformTest = transforms.Compose([
-                transforms.Resize(int(transCrop * 1.14)),
-                transforms.CenterCrop(transCrop),
-                transforms.ToTensor(),
-                normalize
-            ])
+        transformTest = transforms.Compose([
+            transforms.Resize(int(transCrop * 1.14)),
+            transforms.CenterCrop(transCrop),
+            transforms.ToTensor(),
+            normalize
+        ])
         
-        # Dataset
-        if not use_tta:
-            datasetTest = DatasetGenerator(pathDirData, pathFileTest, transformTest)
-            dataLoaderTest = FastDataLoader.create_dataloader(
-                datasetTest,
-                batch_size=trBatchSize,
-                shuffle=False,
-                num_workers=4
-            )
-        else:
-            # For TTA, we'll handle transforms differently
-            datasetTest = DatasetGenerator(pathDirData, pathFileTest, None)
+        # ---- Dataset & DataLoader
+        print("\n📂 Loading test dataset...")
+        datasetTest = DatasetGenerator(
+            pathDirData, 
+            pathFileTest, 
+            transformTest,
+            cache_images=False
+        )
+        
+        num_workers = min(4, os.cpu_count() or 2)
+        dataLoaderTest = FastDataLoader.create_dataloader(
+            datasetTest,
+            batch_size=trBatchSize,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
+        )
         
         print(f"✓ Test samples: {len(datasetTest)}")
+        print(f"✓ Batch size: {trBatchSize}")
+        print(f"✓ Total batches: {len(dataLoaderTest)}")
         
-        # Inference
+        # ---- Inference
+        print("\n🔍 Running inference...")
+        
         allPreds = []
         allTargets = []
         
-        print("\n🔍 Running inference...")
+        # Check if model supports mixed precision
+        amp_dtype = torch.float16
+        use_amp = torch.cuda.is_available()
+        has_tensor_cores = False
         
-        if not use_tta:
-            # Standard inference
-            with torch.no_grad():
-                for input, target in tqdm(dataLoaderTest, desc="Testing"):
-                    input = input.to(device, non_blocking=True)
-                    target = target.to(device, non_blocking=True)
-                    
+        if torch.cuda.is_available():
+            compute_cap = torch.cuda.get_device_capability(0)
+            if compute_cap[0] >= 8:  # Ampere+
+                amp_dtype = torch.bfloat16
+                has_tensor_cores = True
+        
+        with torch.no_grad():
+            pbar = tqdm(dataLoaderTest, desc="Testing", ncols=100)
+            
+            for batch_idx, (input, target) in enumerate(pbar):
+                input = input.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                
+                # Convert to channels_last if using tensor cores
+                if has_tensor_cores:
+                    input = input.to(memory_format=torch.channels_last)
+                
+                # Mixed precision inference
+                if use_amp:
+                    with torch.amp.autocast('cuda', dtype=amp_dtype):
+                        output = model(input)
+                else:
                     output = model(input)
-                    pred = torch.sigmoid(output)
-                    
-                    allPreds.append(pred.cpu())
-                    allTargets.append(target.cpu())
-        else:
-            # TTA inference: Average predictions across augmentations
-            with torch.no_grad():
-                for idx in tqdm(range(len(datasetTest)), desc="Testing with TTA"):
-                    image_path = os.path.join(pathDirData, datasetTest.listImagePaths[idx])
-                    target = datasetTest.listImageLabels[idx]
-                    
-                    # Load original image
-                    from PIL import Image
-                    image = Image.open(image_path).convert('RGB')
-                    
-                    # Apply each TTA transform and collect predictions
-                    tta_preds = []
-                    for transform in tta_transforms:
-                        input_tensor = transform(image).unsqueeze(0).to(device)
-                        output = model(input_tensor)
-                        pred = torch.sigmoid(output)
-                        tta_preds.append(pred.cpu())
-                    
-                    # Average TTA predictions
-                    avg_pred = torch.stack(tta_preds).mean(dim=0)
-                    
-                    allPreds.append(avg_pred)
-                    allTargets.append(target.unsqueeze(0))
+                
+                # Apply sigmoid to get probabilities
+                pred = torch.sigmoid(output)
+                
+                # Store predictions and targets
+                allPreds.append(pred.cpu())
+                allTargets.append(target.cpu())
+                
+                # Update progress bar
+                pbar.set_postfix({'batch': f'{batch_idx+1}/{len(dataLoaderTest)}'})
         
+        # ---- Concatenate all predictions and targets
         allPreds = torch.cat(allPreds, dim=0).numpy()
         allTargets = torch.cat(allTargets, dim=0).numpy()
         
-        # Compute AUROC per class
+        print(f"\n✓ Predictions shape: {allPreds.shape}")
+        print(f"✓ Targets shape: {allTargets.shape}")
+        
+        # ---- Compute AUROC per class
+        print("\n📊 Computing metrics...")
+        
         aurocIndividual = []
         for i in range(nnClassCount):
             try:
-                auroc = roc_auc_score(allTargets[:, i], allPreds[:, i])
-                aurocIndividual.append(auroc)
-            except:
+                # Check if class has positive samples
+                if allTargets[:, i].sum() > 0 and allTargets[:, i].sum() < len(allTargets):
+                    auroc = roc_auc_score(allTargets[:, i], allPreds[:, i])
+                    aurocIndividual.append(auroc)
+                else:
+                    print(f"  ⚠ Class {i} ({ChexnetTrainer.CLASS_NAMES[i]}): No positive/negative samples")
+                    aurocIndividual.append(np.nan)
+            except Exception as e:
+                print(f"  ⚠ Class {i} ({ChexnetTrainer.CLASS_NAMES[i]}): Error - {e}")
                 aurocIndividual.append(np.nan)
         
         aurocMean = np.nanmean(aurocIndividual)
         
-        # Print results
+        # Compute overall accuracy
+        acc = ChexnetTrainer.computeAccuracy(allTargets, allPreds)
+        
+        # ---- Print Results
         print("\n" + "="*80)
-        print("📊 Test Results")
-        if use_tta:
-            print(f"(with {num_tta} Test-Time Augmentations)")
+        print("📊 TEST RESULTS")
         print("="*80)
-        print(f"\n🎯 Mean AUROC: {aurocMean:.4f}\n")
-        print(f"{'Disease':<25} {'AUROC':<10} {'Status':<10}")
-        print("-" * 50)
+        print(f"\n🎯 Mean AUROC: {aurocMean:.4f}")
+        print(f"🎯 Overall Accuracy: {acc:.4f}\n")
+        
+        print(f"{'Disease':<25} {'AUROC':<10} {'Samples':<10} {'Status':<10}")
+        print("-" * 60)
         
         for i, name in enumerate(ChexnetTrainer.CLASS_NAMES[:nnClassCount]):
             auroc_val = aurocIndividual[i]
+            num_positive = int(allTargets[:, i].sum())
+            
             if not np.isnan(auroc_val):
-                status = "✓✓" if auroc_val >= 0.85 else "✓" if auroc_val >= 0.75 else "⚠"
-                print(f"{name:<25} {auroc_val:<10.4f} {status:<10}")
+                # Status indicators
+                if auroc_val >= 0.85:
+                    status = "✓✓ Excellent"
+                elif auroc_val >= 0.75:
+                    status = "✓ Good"
+                elif auroc_val >= 0.65:
+                    status = "⚠ Fair"
+                else:
+                    status = "✗ Poor"
+                
+                print(f"{name:<25} {auroc_val:<10.4f} {num_positive:<10} {status:<10}")
             else:
-                print(f"{name:<25} {'N/A':<10} {'-':<10}")
+                print(f"{name:<25} {'N/A':<10} {num_positive:<10} {'-':<10}")
         
         print("="*80)
+        
+        # ---- Summary Statistics
+        valid_aurocs = [a for a in aurocIndividual if not np.isnan(a)]
+        if valid_aurocs:
+            print(f"\n📈 Summary:")
+            print(f"  Valid classes: {len(valid_aurocs)}/{nnClassCount}")
+            print(f"  Best AUROC: {max(valid_aurocs):.4f} ({ChexnetTrainer.CLASS_NAMES[aurocIndividual.index(max(valid_aurocs))]})")
+            print(f"  Worst AUROC: {min(valid_aurocs):.4f} ({ChexnetTrainer.CLASS_NAMES[aurocIndividual.index(min(valid_aurocs))]})")
+            print(f"  Std Dev: {np.std(valid_aurocs):.4f}")
+        
+        # ---- GPU Memory Usage
+        if torch.cuda.is_available():
+            print(f"\n💾 GPU Memory Usage:")
+            for i in range(torch.cuda.device_count()):
+                allocated = torch.cuda.memory_allocated(i) / 1024**3
+                reserved = torch.cuda.memory_reserved(i) / 1024**3
+                print(f"  GPU {i}: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
+        
+        print("\n" + "="*80)
+        print("✅ Testing completed!")
+        print("="*80 + "\n")
         
         return aurocMean, aurocIndividual, allPreds, allTargets
