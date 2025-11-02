@@ -209,7 +209,7 @@ def runResume():
     print("\n✅ Training resumed and completed!")
 
 def runTest(pathModel=None, image_size=None):
-    """Test trained model with optional TTA"""
+    """Test trained model"""
     print("\n[MODE] Testing")
     
     # ---- Paths
@@ -237,23 +237,25 @@ def runTest(pathModel=None, image_size=None):
     
     trBatchSize = int(input(f"Batch size [32]: ").strip() or "32")
     
-    # Test-Time Augmentation
-    use_tta = input("\nUse Test-Time Augmentation (TTA)? [y/N]: ").strip().lower() == 'y'
-    num_tta = 5
-    if use_tta:
-        num_tta = int(input("Number of TTA augmentations [5]: ").strip() or "5")
-        print(f"✓ TTA enabled with {num_tta} augmentations (improves AUROC by ~0.5-1%)")
-    
-    print(f"\n🔍 Testing model: {pathModel}")
+    print(f"\n🔍 Testing configuration:")
+    print(f"   Model: {pathModel}")
     print(f"   Image size: {imgtransCrop}x{imgtransCrop}")
-    print(f"   TTA: {'Enabled' if use_tta else 'Disabled'}")
+    print(f"   Batch size: {trBatchSize}")
+    print(f"   Test samples: {pathFileTest}")
+    
+    confirm = input("\n▶️ Start testing? [Y/n]: ").strip().lower()
+    if confirm == 'n':
+        print("Testing cancelled.")
+        return
     
     # Test
+    print("\n" + "="*80)
+    print("🚀 STARTING TESTING")
+    print("="*80)
+    
     aurocMean, aurocIndividual, allPreds, allTargets = ChexnetTrainer.test(
         pathDirData, pathFileTest, pathModel,
-        nnClassCount, trBatchSize, imgtransCrop,
-        use_tta=use_tta,
-        num_tta=num_tta
+        nnClassCount, trBatchSize, imgtransCrop
     )
     
     # Visualize results
@@ -261,52 +263,46 @@ def runTest(pathModel=None, image_size=None):
         visualize = input("\n📊 Generate visualization plots? [Y/n]: ").strip().lower()
         if visualize != 'n':
             from Models.visualize import plot_results
-            save_dir = f'CheXNet/Results/test_{"tta" if use_tta else "standard"}'
+            save_dir = 'CheXNet/Results/test_results'
             os.makedirs(save_dir, exist_ok=True)
             
             print(f"\n📈 Generating visualizations...")
-            plot_results(allTargets, allPreds, aurocIndividual, 
-                        ChexnetTrainer.CLASS_NAMES[:nnClassCount],
-                        save_dir=save_dir)
+            plot_results(
+                allTargets, allPreds, aurocIndividual, 
+                ChexnetTrainer.CLASS_NAMES[:nnClassCount],
+                save_dir=save_dir
+            )
             print(f"✓ Plots saved to: {save_dir}")
     except ImportError:
         print("⚠ Visualization module not found. Skipping plots.")
     except Exception as e:
         print(f"⚠ Error generating plots: {e}")
     
-    # Generate heatmaps
+    # Save predictions
     try:
-        heatmap = input("\n🔥 Generate Grad-CAM heatmaps? [y/N]: ").strip().lower()
-        if heatmap == 'y':
-            from Models.head_map import generate_multi_class_heatmap
+        save_preds = input("\n💾 Save predictions to file? [y/N]: ").strip().lower()
+        if save_preds == 'y':
+            import numpy as np
+            save_dir = 'CheXNet/Results/predictions'
+            os.makedirs(save_dir, exist_ok=True)
             
-            sample_image = input("Enter image path (or press Enter for default): ").strip()
-            if not sample_image:
-                sample_image = 'CheXNet/Database/images_001/images/00000001_000.png'
+            np.save(f"{save_dir}/predictions.npy", allPreds)
+            np.save(f"{save_dir}/targets.npy", allTargets)
+            np.save(f"{save_dir}/auroc_individual.npy", aurocIndividual)
             
-            if os.path.exists(sample_image):
-                print(f"\n🔥 Generating heatmaps for: {sample_image}")
-                generate_multi_class_heatmap(
-                    pathModel, sample_image, 
-                    ChexnetTrainer.CLASS_NAMES[:nnClassCount],
-                    num_classes=nnClassCount,
-                    image_size=imgtransCrop,
-                    top_k=5,
-                    save_dir='CheXNet/Heatmaps'
-                )
-            else:
-                print(f"⚠ Image not found: {sample_image}")
-    except ImportError:
-        print("⚠ Heatmap module not found.")
+            print(f"✓ Predictions saved to: {save_dir}")
+            print(f"  - predictions.npy: shape {allPreds.shape}")
+            print(f"  - targets.npy: shape {allTargets.shape}")
+            print(f"  - auroc_individual.npy: shape {len(aurocIndividual)}")
     except Exception as e:
-        print(f"⚠ Error generating heatmaps: {e}")
+        print(f"⚠ Error saving predictions: {e}")
     
     print("\n" + "="*80)
     print("✅ TESTING COMPLETED!")
     print(f"🎯 Final Mean AUROC: {aurocMean:.4f}")
-    if use_tta:
-        print(f"   (with {num_tta} Test-Time Augmentations)")
     print("="*80)
+    
+    return aurocMean, aurocIndividual, allPreds, allTargets
 
 if __name__ == '__main__':
     try:
