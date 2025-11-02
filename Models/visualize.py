@@ -1,8 +1,7 @@
-# visualize.py
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, roc_curve, auc
+from sklearn.metrics import confusion_matrix, roc_curve, auc, precision_score, recall_score, f1_score
 import os
 
 def plot_auroc_bars(auroc_scores, class_names, save_dir):
@@ -67,7 +66,7 @@ def plot_roc_curves(targets, predictions, class_names, save_dir):
             ax.set_title(f'{class_names[i]}', fontweight='bold')
             ax.legend(loc="lower right", fontsize=8)
             ax.grid(alpha=0.3)
-        except:
+        except Exception as e:
             ax.text(0.5, 0.5, 'N/A', ha='center', va='center', fontsize=12)
             ax.set_title(f'{class_names[i]}', fontweight='bold')
     
@@ -93,8 +92,15 @@ def plot_confusion_matrices(targets, predictions, class_names, save_dir, thresho
         # Binary confusion matrix for this class
         cm = confusion_matrix(targets[:, i], pred_binary[:, i])
         
+        # Handle case where confusion matrix might not be 2x2
+        if cm.shape != (2, 2):
+            # Pad to 2x2 if necessary
+            cm_padded = np.zeros((2, 2), dtype=int)
+            cm_padded[:cm.shape[0], :cm.shape[1]] = cm
+            cm = cm_padded
+        
         # Normalize
-        cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
         
         # Plot
         sns.heatmap(cm_norm, annot=True, fmt='.2%', cmap='Blues', 
@@ -131,11 +137,13 @@ def plot_prediction_distribution(targets, predictions, class_names, save_dir):
         pos_preds = predictions[targets[:, i] == 1, i]
         neg_preds = predictions[targets[:, i] == 0, i]
         
-        # Plot histograms
-        ax.hist(neg_preds, bins=50, alpha=0.6, color='blue', 
-               label=f'Negative (n={len(neg_preds)})', density=True)
-        ax.hist(pos_preds, bins=50, alpha=0.6, color='red', 
-               label=f'Positive (n={len(pos_preds)})', density=True)
+        # Plot histograms only if there's data
+        if len(neg_preds) > 0:
+            ax.hist(neg_preds, bins=50, alpha=0.6, color='blue', 
+                   label=f'Negative (n={len(neg_preds)})', density=True)
+        if len(pos_preds) > 0:
+            ax.hist(pos_preds, bins=50, alpha=0.6, color='red', 
+                   label=f'Positive (n={len(pos_preds)})', density=True)
         
         ax.axvline(x=0.5, color='black', linestyle='--', alpha=0.5, label='Threshold')
         ax.set_xlabel('Prediction Score')
@@ -152,8 +160,6 @@ def plot_prediction_distribution(targets, predictions, class_names, save_dir):
 
 def plot_performance_comparison(targets, predictions, auroc_scores, class_names, save_dir, threshold=0.5):
     """Plot comprehensive performance comparison"""
-    from sklearn.metrics import precision_score, recall_score, f1_score
-    
     pred_binary = (predictions >= threshold).astype(int)
     
     # Compute metrics for each class
@@ -166,7 +172,7 @@ def plot_performance_comparison(targets, predictions, auroc_scores, class_names,
             precisions.append(precision_score(targets[:, i], pred_binary[:, i], zero_division=0))
             recalls.append(recall_score(targets[:, i], pred_binary[:, i], zero_division=0))
             f1_scores.append(f1_score(targets[:, i], pred_binary[:, i], zero_division=0))
-        except:
+        except Exception as e:
             precisions.append(0)
             recalls.append(0)
             f1_scores.append(0)
@@ -208,11 +214,11 @@ def plot_results(targets, predictions, auroc_scores, class_names, save_dir='CheX
     """
     os.makedirs(save_dir, exist_ok=True)
     
-    num_classes = len(class_names)
-    
     # Set style
     sns.set_style("whitegrid")
     plt.rcParams['figure.figsize'] = (16, 10)
+    
+    print("\nGenerating visualizations...")
     
     # 1. AUROC Bar Plot
     plot_auroc_bars(auroc_scores, class_names, save_dir)
@@ -229,6 +235,4 @@ def plot_results(targets, predictions, auroc_scores, class_names, save_dir='CheX
     # 5. Class-wise Performance Comparison
     plot_performance_comparison(targets, predictions, auroc_scores, class_names, save_dir)
     
-    print(f"\nAll plots saved to: {save_dir}")
-
-def plot_
+    print(f"\n✅ All plots saved to: {save_dir}")
