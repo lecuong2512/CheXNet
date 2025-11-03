@@ -505,8 +505,8 @@ class ChexnetTrainer:
             })
         
         # Compute metrics
-        allPreds = torch.cat(allPreds, dim=0).numpy()
-        allTargets = torch.cat(allTargets, dim=0).numpy()
+        allPreds = torch.cat(allPreds, dim=0).to(torch.float32).numpy()
+        allTargets = torch.cat(allTargets, dim=0).to(torch.float32).numpy()
         
         auroc = ChexnetTrainer.computeAUROC_mean(allTargets, allPreds)
         acc = ChexnetTrainer.computeAccuracy(allTargets, allPreds)
@@ -553,8 +553,8 @@ class ChexnetTrainer:
                 pbar.set_postfix({'loss': f'{avgLoss:.4f}'})
         
         # Compute metrics
-        allPreds = torch.cat(allPreds, dim=0).numpy()
-        allTargets = torch.cat(allTargets, dim=0).numpy()
+        allPreds = torch.cat(allPreds, dim=0).to(torch.float32).numpy()
+        allTargets = torch.cat(allTargets, dim=0).to(torch.float32).numpy()
         
         auroc = ChexnetTrainer.computeAUROC_mean(allTargets, allPreds)
         acc = ChexnetTrainer.computeAccuracy(allTargets, allPreds)
@@ -742,8 +742,8 @@ class ChexnetTrainer:
                 pbar.set_postfix({'batch': f'{batch_idx+1}/{len(dataLoaderTest)}'})
         
         # ---- Concatenate all predictions and targets
-        allPreds = torch.cat(allPreds, dim=0).numpy()
-        allTargets = torch.cat(allTargets, dim=0).numpy()
+        allPreds = torch.cat(allPreds, dim=0).to(torch.float32).numpy()
+        allTargets = torch.cat(allTargets, dim=0).to(torch.float32).numpy()
         
         print(f"\n✓ Predictions shape: {allPreds.shape}")
         print(f"✓ Targets shape: {allTargets.shape}")
