@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  # ── MongoDB Database ────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: chexnet-mongodb
+    restart: always
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - chexnet_network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis Cache & PubSub ───────────────────────────────────────────────────
+  redis:
+    image: redis:7.0-alpine
+    container_name: chexnet-redis
+    restart: always
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    networks:
+      - chexnet_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Python AI FastAPI Service ────────────────────────────────────────────────
+  chexnet-ai:
+    build:
+      context: ./ai_service
+      dockerfile: Dockerfile
+    container_name: chexnet-ai-service
+    restart: always
+    ports:
+      - '8000:8000'
+    volumes:
+      # Map thư mục Models và Trainedmodel từ ngoài workspace vào container
+      - ../Models:/Models:ro
+      - ../Trainedmodel:/Trainedmodel:ro
+    environment:
+      - XRAY_AI_VALIDATE=true
+      - XRAY_VALIDATE_STRICT=true
+    networks:
+      - chexnet_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+
+  # ── Node.js Express Backend ────────────────────────────────────────────────
+  chexnet-be:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chexnet-backend
+    restart: always
+    ports:
+      - '3000:3000'
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chexnet-ai:
+        condition: service_healthy
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://mongodb:27017/chexnet_v3?retryWrites=false
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=""
+      - REDIS_PREFIX="chexnet::"
+      - JWT_PRIVATE_KEY="chexnet-v3-super-secret-jwt-key-2024"
+      - JWT_EXPIRES_IN="15m"
+      - JWT_REFRESH_EXPIRES_IN="7d"
+      - CRYPTO_SECRET="chexnet-v3-aes-256-crypto-secret-key"
+      - AI_SERVICE_URL="http://chexnet-ai:8000"
+      - UPLOAD_DIR="./uploads"
+      - MAX_FILE_SIZE_MB="10"
+      - ALLOWED_ORIGINS="http://localhost:5173"
+      - LOG_LEVEL="info"
+    networks:
+      - chexnet_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+networks:
+  chexnet_network:
+    driver: bridge

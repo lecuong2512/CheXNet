@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+
+<html lang="vi"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>CheXNet - Research Portal</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@600;700&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "on-error-container": "#93000a",
+                        "on-primary": "#ffffff",
+                        "on-background": "#191c1e",
+                        "on-error": "#ffffff",
+                        "primary": "#004ac6",
+                        "primary-container": "#2563eb",
+                        "tertiary": "#943700",
+                        "inverse-primary": "#b4c5ff",
+                        "outline-variant": "#c3c6d7",
+                        "on-secondary": "#ffffff",
+                        "tertiary-container": "#bc4800",
+                        "on-secondary-fixed-variant": "#3f465c",
+                        "inverse-surface": "#2d3133",
+                        "on-surface": "#191c1e",
+                        "secondary": "#565e74",
+                        "surface-container-high": "#e6e8ea",
+                        "background": "#f7f9fb",
+                        "surface-bright": "#f7f9fb",
+                        "surface-container-highest": "#e0e3e5",
+                        "primary-fixed": "#dbe1ff",
+                        "secondary-fixed-dim": "#bec6e0",
+                        "surface-container-lowest": "#ffffff",
+                        "error-container": "#ffdad6",
+                        "on-tertiary-container": "#ffede6",
+                        "primary-fixed-dim": "#b4c5ff",
+                        "surface-container": "#eceef0",
+                        "outline": "#737686",
+                        "surface-dim": "#d8dadc",
+                        "surface": "#f7f9fb",
+                        "on-surface-variant": "#434655",
+                        "tertiary-fixed-dim": "#ffb596",
+                        "secondary-container": "#dae2fd",
+                        "surface-container-low": "#f2f4f6",
+                        "on-secondary-fixed": "#131b2e",
+                        "on-tertiary-fixed-variant": "#7d2d00",
+                        "surface-tint": "#0053db",
+                        "inverse-on-surface": "#eff1f3",
+                        "on-secondary-container": "#5c647a",
+                        "secondary-fixed": "#dae2fd",
+                        "on-tertiary": "#ffffff",
+                        "tertiary-fixed": "#ffdbcd",
+                        "on-primary-container": "#eeefff",
+                        "surface-variant": "#e0e3e5",
+                        "on-primary-fixed": "#00174b",
+                        "error": "#ba1a1a",
+                        "on-primary-fixed-variant": "#003ea8",
+                        "on-tertiary-fixed": "#360f00"
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    spacing: {
+                        "margin": "32px",
+                        "base": "4px",
+                        "container-max": "1440px",
+                        "stack-sm": "8px",
+                        "stack-md": "16px",
+                        "stack-lg": "32px",
+                        "gutter": "24px"
+                    },
+                    fontFamily: {
+                        "headline-md": ["Manrope"],
+                        "display-lg": ["Manrope"],
+                        "body-lg": ["Inter"],
+                        "headline-lg-mobile": ["Manrope"],
+                        "label-bold": ["Inter"],
+                        "body-md": ["Inter"],
+                        "label-sm": ["Inter"],
+                        "headline-lg": ["Manrope"]
+                    },
+                    fontSize: {
+                        "headline-md": ["24px", { "lineHeight": "1.3", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+                        "display-lg": ["48px", { "lineHeight": "1.1", "letterSpacing": "-0.03em", "fontWeight": "700" }],
+                        "body-lg": ["18px", { "lineHeight": "1.6", "letterSpacing": "-0.01em", "fontWeight": "400" }],
+                        "headline-lg-mobile": ["28px", { "lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+                        "label-bold": ["14px", { "lineHeight": "1.4", "letterSpacing": "0.01em", "fontWeight": "600" }],
+                        "body-md": ["16px", { "lineHeight": "1.5", "letterSpacing": "-0.01em", "fontWeight": "400" }],
+                        "label-sm": ["12px", { "lineHeight": "1.4", "letterSpacing": "0.02em", "fontWeight": "500" }],
+                        "headline-lg": ["32px", { "lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .icon-fill {
+            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        
+        /* Subtle grid background for the analytical feel */
+        .bg-grid-pattern {
+            background-image: 
+                linear-gradient(to right, rgba(195, 198, 215, 0.15) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(195, 198, 215, 0.15) 1px, transparent 1px);
+            background-size: 24px 24px;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background font-body-md text-body-md antialiased overflow-hidden flex h-screen">
+<!-- Desktop SideNavBar -->
+<nav class="hidden md:flex flex-col bg-surface h-screen w-64 border-r border-outline-variant/30 fixed left-0 top-0 p-stack-md z-40">
+<!-- Header -->
+<div class="flex items-center gap-stack-sm mb-stack-lg px-stack-sm">
+<div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-on-primary">
+<span class="material-symbols-outlined text-[18px]">medical_services</span>
+</div>
+<div>
+<h1 class="text-headline-md font-headline-md font-extrabold text-primary">CheXNet</h1>
+<p class="text-label-sm font-label-sm text-on-surface-variant">Clinical Precision v2.1</p>
+</div>
+</div>
+<!-- Main Nav -->
+<div class="flex flex-col gap-stack-sm flex-1">
+<a class="flex items-center gap-stack-sm px-stack-sm py-2 rounded-lg text-on-secondary-container hover:bg-surface-container-highest transition-all duration-200" href="#">
+<span class="material-symbols-outlined">monitor_heart</span>
+<span class="text-label-bold font-label-bold">Diagnostic Hub</span>
+</a>
+<a class="flex items-center gap-stack-sm px-stack-sm py-2 rounded-lg text-on-secondary-container hover:bg-surface-container-highest transition-all duration-200" href="#">
+<span class="material-symbols-outlined">history</span>
+<span class="text-label-bold font-label-bold">Patient History</span>
+</a>
+<a class="flex items-center gap-stack-sm px-stack-sm py-2 rounded-lg bg-primary/10 text-primary font-bold translate-x-1 duration-150" href="#">
+<span class="material-symbols-outlined icon-fill">science</span>
+<span class="text-label-bold font-label-bold">Research Portal</span>
+</a>
+<a class="flex items-center gap-stack-sm px-stack-sm py-2 rounded-lg text-on-secondary-container hover:bg-surface-container-highest transition-all duration-200" href="#">
+<span class="material-symbols-outlined">inventory_2</span>
+<span class="text-label-bold font-label-bold">System Archive</span>
+</a>
+</div>
+<!-- Footer Nav -->
+<div class="flex flex-col gap-stack-sm pt-stack-md border-t border-outline-variant/30">
+<a class="flex items-center gap-stack-sm px-stack-sm py-2 rounded-lg text-on-secondary-container hover:bg-surface-container-highest transition-all duration-200" href="#">
+<span class="material-symbols-outlined">help_outline</span>
+<span class="text-label-bold font-label-bold">Support</span>
+</a>
+<a class="flex items-center gap-stack-sm px-stack-sm py-2 rounded-lg text-on-secondary-container hover:bg-surface-container-highest transition-all duration-200" href="#">
+<span class="material-symbols-outlined">description</span>
+<span class="text-label-bold font-label-bold">Documentation</span>
+</a>
+</div>
+<!-- CTA -->
+<button class="mt-stack-md w-full bg-primary text-on-primary py-2 rounded-lg text-label-bold font-label-bold shadow-sm hover:bg-primary-container transition-colors">
+            New Analysis
+        </button>
+</nav>
+<!-- Mobile TopNavBar -->
+<nav class="md:hidden flex justify-between items-center w-full px-gutter h-16 sticky top-0 z-50 bg-white/70 backdrop-blur-xl border-b border-outline-variant/30 shadow-sm fixed">
+<div class="flex items-center gap-stack-sm">
+<button class="text-on-surface-variant hover:bg-primary-container/10 transition-colors p-1 rounded">
+<span class="material-symbols-outlined">menu</span>
+</button>
+<span class="text-headline-md font-headline-md font-bold tracking-tight text-primary">CheXNet</span>
+</div>
+<div class="flex items-center gap-stack-sm text-primary">
+<button class="scale-95 active:opacity-80 transition-all hover:bg-primary-container/10 p-1 rounded"><span class="material-symbols-outlined">notifications</span></button>
+<button class="scale-95 active:opacity-80 transition-all hover:bg-primary-container/10 p-1 rounded"><span class="material-symbols-outlined">settings</span></button>
+<div class="w-8 h-8 rounded-full bg-surface-container-high overflow-hidden border border-outline-variant/30">
+<span class="material-symbols-outlined w-full h-full flex items-center justify-center text-on-surface-variant text-[20px]">person</span>
+</div>
+</div>
+</nav>
+<!-- Main Content Area -->
+<main class="flex-1 md:ml-64 bg-surface h-full flex flex-col relative">
+<!-- System Status Bar (Ambient) -->
+<div class="h-1 w-full bg-surface-container-low absolute top-0 left-0 z-10 hidden md:block">
+<div class="h-full bg-primary/40 w-1/3 rounded-r-full shadow-[0_0_8px_rgba(0,74,198,0.5)] animate-pulse"></div>
+</div>
+<div class="flex-1 overflow-y-auto p-gutter bg-grid-pattern">
+<!-- Header Section -->
+<header class="flex flex-col md:flex-row justify-between items-start md:items-center mb-margin gap-stack-md mt-16 md:mt-0">
+<div>
+<h2 class="text-headline-lg font-headline-lg text-on-background">Cổng Thống kê &amp; Nghiên cứu Bệnh lý Phổi</h2>
+<p class="text-body-lg font-body-lg text-on-surface-variant mt-1">Phân tích dữ liệu &amp; Báo cáo tổng hợp thời gian thực</p>
+</div>
+<div class="flex gap-stack-sm">
+<button class="flex items-center gap-2 px-4 py-2 bg-surface-container-lowest border border-outline-variant/50 rounded-lg text-label-bold font-label-bold text-on-surface-variant hover:border-primary hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-[18px]">calendar_month</span>
+                        30 Ngày Qua
+                    </button>
+<button class="flex items-center gap-2 px-4 py-2 bg-primary text-on-primary rounded-lg text-label-bold font-label-bold shadow-sm hover:bg-primary-container transition-colors">
+<span class="material-symbols-outlined text-[18px]">download</span>
+                        Xuất Dữ Liệu
+                    </button>
+</div>
+</header>
+<!-- Bento Grid Layout -->
+<div class="grid grid-cols-1 md:grid-cols-12 gap-gutter auto-rows-min">
+<!-- KPI Cards (Row 1) -->
+<div class="col-span-1 md:col-span-4 bg-surface-container-lowest rounded-xl border border-outline-variant/30 shadow-sm p-stack-md flex flex-col relative overflow-hidden group hover:border-primary/50 transition-colors">
+<div class="absolute top-0 right-0 w-24 h-24 bg-primary/5 rounded-bl-full -mr-4 -mt-4 transition-transform group-hover:scale-110"></div>
+<div class="flex justify-between items-start mb-stack-sm relative z-10">
+<div class="p-2 bg-surface-container-low rounded-lg text-primary">
+<span class="material-symbols-outlined">view_in_ar</span>
+</div>
+<span class="flex items-center text-label-sm font-label-sm text-[#006828] bg-[#c4eed0] px-2 py-0.5 rounded-full">
+<span class="material-symbols-outlined text-[14px] mr-1">trending_up</span> +12.5%
+                        </span>
+</div>
+<div class="relative z-10">
+<p class="text-label-bold font-label-bold text-on-surface-variant">Tổng Số Ca Quét</p>
+<p class="text-display-lg font-display-lg text-on-background tracking-tight mt-1">14,285</p>
+</div>
+</div>
+<div class="col-span-1 md:col-span-4 bg-surface-container-lowest rounded-xl border border-outline-variant/30 shadow-sm p-stack-md flex flex-col relative overflow-hidden group hover:border-primary/50 transition-colors">
+<div class="absolute top-0 right-0 w-24 h-24 bg-primary/5 rounded-bl-full -mr-4 -mt-4 transition-transform group-hover:scale-110"></div>
+<div class="flex justify-between items-start mb-stack-sm relative z-10">
+<div class="p-2 bg-surface-container-low rounded-lg text-primary">
+<span class="material-symbols-outlined">track_changes</span>
+</div>
+<span class="flex items-center text-label-sm font-label-sm text-on-surface-variant bg-surface-container-high px-2 py-0.5 rounded-full">
+                            Ổn định
+                        </span>
+</div>
+<div class="relative z-10">
+<p class="text-label-bold font-label-bold text-on-surface-variant">Độ Chính Xác CheXNet</p>
+<p class="text-display-lg font-display-lg text-primary tracking-tight mt-1">99.8<span class="text-headline-md font-headline-md text-primary/70">%</span></p>
+</div>
+</div>
+<div class="col-span-1 md:col-span-4 bg-surface-container-lowest rounded-xl border border-outline-variant/30 shadow-sm p-stack-md flex flex-col relative overflow-hidden group hover:border-primary/50 transition-colors">
+<div class="absolute top-0 right-0 w-24 h-24 bg-primary/5 rounded-bl-full -mr-4 -mt-4 transition-transform group-hover:scale-110"></div>
+<div class="flex justify-between items-start mb-stack-sm relative z-10">
+<div class="p-2 bg-surface-container-low rounded-lg text-primary">
+<span class="material-symbols-outlined">speed</span>
+</div>
+<span class="flex items-center text-label-sm font-label-sm text-[#006828] bg-[#c4eed0] px-2 py-0.5 rounded-full">
+<span class="material-symbols-outlined text-[14px] mr-1">trending_down</span> -0.3s
+                        </span>
+</div>
+<div class="relative z-10">
+<p class="text-label-bold font-label-bold text-on-surface-variant">Thời Gian Phản Hồi TB</p>
+<p class="text-display-lg font-display-lg text-on-background tracking-tight mt-1">1.2<span class="text-headline-md font-headline-md text-on-surface-variant">s</span></p>
+</div>
+</div>
+<!-- Main Chart Area (Row 2) -->
+<div class="col-span-1 md:col-span-8 bg-surface-container-lowest rounded-xl border border-outline-variant/30 shadow-sm flex flex-col">
+<div class="p-stack-md border-b border-outline-variant/20 flex justify-between items-center">
+<div>
+<h3 class="text-headline-md font-headline-md text-on-background">Biểu Đồ Xu Hướng Tần Suất Bệnh Lý</h3>
+<p class="text-label-sm font-label-sm text-on-surface-variant">Phát hiện Viêm phổi &amp; Tràn dịch màng phổi (30 ngày)</p>
+</div>
+<button class="p-2 text-on-surface-variant hover:bg-surface-container-high rounded-full transition-colors">
+<span class="material-symbols-outlined">more_vert</span>
+</button>
+</div>
+<div class="p-stack-md flex-1 min-h-[300px] relative w-full">
+<!-- Abstract SVG Chart Representation -->
+<svg class="w-full h-full absolute inset-0 p-stack-md" preserveaspectratio="none" viewbox="0 0 800 200">
+<!-- Grid Lines -->
+<line stroke="#e0e3e5" stroke-dasharray="4" stroke-width="1" x1="0" x2="800" y1="50" y2="50"></line>
+<line stroke="#e0e3e5" stroke-dasharray="4" stroke-width="1" x1="0" x2="800" y1="100" y2="100"></line>
+<line stroke="#e0e3e5" stroke-dasharray="4" stroke-width="1" x1="0" x2="800" y1="150" y2="150"></line>
+<!-- Gradient Def -->
+<defs>
+<lineargradient id="chartGrad" x1="0" x2="0" y1="0" y2="1">
+<stop offset="0%" stop-color="#004ac6" stop-opacity="0.2"></stop>
+<stop offset="100%" stop-color="#004ac6" stop-opacity="0"></stop>
+</lineargradient>
+</defs>
+<!-- Area Fill -->
+<path d="M0,180 C100,160 200,80 300,100 C400,120 500,40 600,60 C700,80 800,20 800,20 L800,200 L0,200 Z" fill="url(#chartGrad)"></path>
+<!-- Line 1 (Pneumonia) - Primary -->
+<path d="M0,180 C100,160 200,80 300,100 C400,120 500,40 600,60 C700,80 800,20 800,20" fill="none" stroke="#004ac6" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"></path>
+<!-- Line 2 (Pleural Effusion) - Secondary -->
+<path d="M0,190 C150,180 250,140 350,150 C450,160 550,110 650,120 C750,130 800,90 800,90" fill="none" stroke="#737686" stroke-dasharray="6" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+<!-- Data Points -->
+<circle cx="200" cy="80" fill="#ffffff" r="4" stroke="#004ac6" stroke-width="2"></circle>
+<circle cx="500" cy="40" fill="#ffffff" r="4" stroke="#004ac6" stroke-width="2"></circle>
+</svg>
+<!-- Axis Labels Overlay -->
+<div class="absolute bottom-2 left-stack-md right-stack-md flex justify-between text-label-sm font-label-sm text-on-surface-variant">
+<span>Tuần 1</span><span>Tuần 2</span><span>Tuần 3</span><span>Tuần 4</span>
+</div>
+</div>
+</div>
+<!-- Secondary Insight Card (Row 2) -->
+<div class="col-span-1 md:col-span-4 bg-surface-container-lowest rounded-xl border border-outline-variant/30 shadow-sm p-stack-md flex flex-col">
+<h3 class="text-label-bold font-label-bold text-on-background mb-stack-md uppercase tracking-wider">Cảnh Báo Lâm Sàng</h3>
+<div class="flex-1 flex flex-col gap-stack-sm">
+<!-- Alert Item -->
+<div class="p-3 bg-error-container/30 border border-error/20 rounded-lg flex gap-3 items-start">
+<span class="material-symbols-outlined text-error mt-0.5">warning</span>
+<div>
+<p class="text-label-bold font-label-bold text-on-background">Cụm Khối U Dấu Hiệu Lạ</p>
+<p class="text-label-sm font-label-sm text-on-surface-variant">Phát hiện 3 ca có đặc điểm tương đồng tại Khu Vực B.</p>
+</div>
+</div>
+<!-- Info Item -->
+<div class="p-3 bg-surface-container-low rounded-lg flex gap-3 items-start">
+<span class="material-symbols-outlined text-primary mt-0.5">info</span>
+<div>
+<p class="text-label-bold font-label-bold text-on-background">Hiệu Suất Cập Nhật</p>
+<p class="text-label-sm font-label-sm text-on-surface-variant">Mô hình phân tích đã hoàn tất quá trình retraining.</p>
+</div>
+</div>
+<div class="mt-auto pt-stack-md">
+<div class="flex justify-between items-center mb-1">
+<span class="text-label-sm font-label-sm text-on-surface-variant">Tải dữ liệu AI</span>
+<span class="text-label-bold font-label-bold text-primary">100%</span>
+</div>
+<div class="w-full bg-surface-container-high rounded-full h-1.5">
+<div class="bg-primary h-1.5 rounded-full" style="width: 100%"></div>
+</div>
+</div>
+</div>
+</div>
+<!-- Heatmap (Row 3) -->
+<div class="col-span-1 md:col-span-12 bg-surface-container-lowest rounded-xl border border-outline-variant/30 shadow-sm flex flex-col md:flex-row overflow-hidden">
+<div class="p-stack-md md:w-1/3 border-b md:border-b-0 md:border-r border-outline-variant/20 bg-surface-container-low/50">
+<h3 class="text-headline-md font-headline-md text-on-background mb-1">Bản Đồ Phân Bố Bệnh Lý</h3>
+<p class="text-body-md font-body-md text-on-surface-variant mb-stack-lg">Mật độ phát hiện các dấu hiệu bất thường trên vùng ảnh phổi.</p>
+<div class="flex flex-col gap-3">
+<div class="flex items-center gap-2">
+<div class="w-4 h-4 rounded bg-error opacity-80"></div>
+<span class="text-label-bold font-label-bold text-on-background">Nguy Cơ Cao (Khối u, Tổn thương)</span>
+</div>
+<div class="flex items-center gap-2">
+<div class="w-4 h-4 rounded bg-tertiary opacity-60"></div>
+<span class="text-label-bold font-label-bold text-on-background">Nguy Cơ Trung Bình (Viêm)</span>
+</div>
+<div class="flex items-center gap-2">
+<div class="w-4 h-4 rounded bg-primary opacity-30"></div>
+<span class="text-label-bold font-label-bold text-on-background">Theo Dõi Thường Quy</span>
+</div>
+</div>
+</div>
+<div class="p-stack-md md:w-2/3 flex items-center justify-center relative min-h-[250px] bg-background">
+<!-- Simulated Heatmap via CSS Grid & Opacity -->
+<div class="grid grid-cols-8 grid-rows-4 gap-1 w-full max-w-lg opacity-90">
+<!-- Row 1 -->
+<div class="bg-primary/10 rounded aspect-square"></div>
+<div class="bg-primary/20 rounded aspect-square"></div>
+<div class="bg-tertiary/40 rounded aspect-square"></div>
+<div class="bg-error/70 rounded aspect-square animate-pulse"></div>
+<div class="bg-tertiary/50 rounded aspect-square"></div>
+<div class="bg-primary/30 rounded aspect-square"></div>
+<div class="bg-primary/10 rounded aspect-square"></div>
+<div class="bg-transparent rounded aspect-square"></div>
+<!-- Row 2 -->
+<div class="bg-primary/20 rounded aspect-square"></div>
+<div class="bg-tertiary/30 rounded aspect-square"></div>
+<div class="bg-error/60 rounded aspect-square"></div>
+<div class="bg-error/90 rounded aspect-square shadow-[0_0_12px_rgba(186,26,26,0.6)]"></div>
+<div class="bg-error/50 rounded aspect-square"></div>
+<div class="bg-tertiary/40 rounded aspect-square"></div>
+<div class="bg-primary/20 rounded aspect-square"></div>
+<div class="bg-primary/10 rounded aspect-square"></div>
+<!-- Row 3 -->
+<div class="bg-transparent rounded aspect-square"></div>
+<div class="bg-primary/10 rounded aspect-square"></div>
+<div class="bg-tertiary/20 rounded aspect-square"></div>
+<div class="bg-tertiary/60 rounded aspect-square"></div>
+<div class="bg-tertiary/30 rounded aspect-square"></div>
+<div class="bg-primary/20 rounded aspect-square"></div>
+<div class="bg-primary/10 rounded aspect-square"></div>
+<div class="bg-transparent rounded aspect-square"></div>
+<!-- Row 4 -->
+<div class="bg-transparent rounded aspect-square"></div>
+<div class="bg-transparent rounded aspect-square"></div>
+<div class="bg-primary/10 rounded aspect-square"></div>
+<div class="bg-primary/20 rounded aspect-square"></div>
+<div class="bg-primary/10 rounded aspect-square"></div>
+<div class="bg-transparent rounded aspect-square"></div>
+<div class="bg-transparent rounded aspect-square"></div>
+<div class="bg-transparent rounded aspect-square"></div>
+</div>
+<!-- Overlay Reticle for analytical feel -->
+<div class="absolute inset-0 pointer-events-none flex items-center justify-center">
+<div class="w-full max-w-lg h-full border border-primary/20 rounded-lg relative">
+<div class="absolute top-1/2 left-0 w-full h-[1px] bg-primary/10"></div>
+<div class="absolute top-0 left-1/2 w-[1px] h-full bg-primary/10"></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+</body></html>

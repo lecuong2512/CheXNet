@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+
+<html lang="vi"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>CheXNet - Bảng điều khiển Chẩn đoán</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Manrope:wght@600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "on-error-container": "#93000a",
+                      "on-primary": "#ffffff",
+                      "on-background": "#191c1e",
+                      "on-error": "#ffffff",
+                      "primary": "#004ac6",
+                      "primary-container": "#2563eb",
+                      "tertiary": "#943700",
+                      "inverse-primary": "#b4c5ff",
+                      "outline-variant": "#c3c6d7",
+                      "on-secondary": "#ffffff",
+                      "tertiary-container": "#bc4800",
+                      "on-secondary-fixed-variant": "#3f465c",
+                      "inverse-surface": "#2d3133",
+                      "on-surface": "#191c1e",
+                      "secondary": "#565e74",
+                      "surface-container-high": "#e6e8ea",
+                      "background": "#f7f9fb",
+                      "surface-bright": "#f7f9fb",
+                      "surface-container-highest": "#e0e3e5",
+                      "primary-fixed": "#dbe1ff",
+                      "secondary-fixed-dim": "#bec6e0",
+                      "surface-container-lowest": "#ffffff",
+                      "error-container": "#ffdad6",
+                      "on-tertiary-container": "#ffede6",
+                      "primary-fixed-dim": "#b4c5ff",
+                      "surface-container": "#eceef0",
+                      "outline": "#737686",
+                      "surface-dim": "#d8dadc",
+                      "surface": "#f7f9fb",
+                      "on-surface-variant": "#434655",
+                      "tertiary-fixed-dim": "#ffb596",
+                      "secondary-container": "#dae2fd",
+                      "surface-container-low": "#f2f4f6",
+                      "on-secondary-fixed": "#131b2e",
+                      "on-tertiary-fixed-variant": "#7d2d00",
+                      "surface-tint": "#0053db",
+                      "inverse-on-surface": "#eff1f3",
+                      "on-secondary-container": "#5c647a",
+                      "secondary-fixed": "#dae2fd",
+                      "on-tertiary": "#ffffff",
+                      "tertiary-fixed": "#ffdbcd",
+                      "on-primary-container": "#eeefff",
+                      "surface-variant": "#e0e3e5",
+                      "on-primary-fixed": "#00174b",
+                      "error": "#ba1a1a",
+                      "on-primary-fixed-variant": "#003ea8",
+                      "on-tertiary-fixed": "#360f00"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.125rem",
+                      "lg": "0.25rem",
+                      "xl": "0.5rem",
+                      "full": "0.75rem"
+              },
+              "spacing": {
+                      "margin": "32px",
+                      "base": "4px",
+                      "container-max": "1440px",
+                      "stack-sm": "8px",
+                      "stack-md": "16px",
+                      "stack-lg": "32px",
+                      "gutter": "24px"
+              },
+              "fontFamily": {
+                      "headline-md": ["Manrope"],
+                      "display-lg": ["Manrope"],
+                      "body-lg": ["Inter"],
+                      "headline-lg-mobile": ["Manrope"],
+                      "label-bold": ["Inter"],
+                      "body-md": ["Inter"],
+                      "label-sm": ["Inter"],
+                      "headline-lg": ["Manrope"]
+              },
+              "fontSize": {
+                      "headline-md": ["24px", { "lineHeight": "1.3", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+                      "display-lg": ["48px", { "lineHeight": "1.1", "letterSpacing": "-0.03em", "fontWeight": "700" }],
+                      "body-lg": ["18px", { "lineHeight": "1.6", "letterSpacing": "-0.01em", "fontWeight": "400" }],
+                      "headline-lg-mobile": ["28px", { "lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+                      "label-bold": ["14px", { "lineHeight": "1.4", "letterSpacing": "0.01em", "fontWeight": "600" }],
+                      "body-md": ["16px", { "lineHeight": "1.5", "letterSpacing": "-0.01em", "fontWeight": "400" }],
+                      "label-sm": ["12px", { "lineHeight": "1.4", "letterSpacing": "0.02em", "fontWeight": "500" }],
+                      "headline-lg": ["32px", { "lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600" }]
+              }
+            }
+          }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .icon-fill {
+            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        
+        /* Custom Scrollbar for sleekness */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #c3c6d7;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #737686;
+        }
+    </style>
+</head>
+<body class="bg-surface text-on-surface font-body-md text-body-md h-screen w-screen overflow-hidden flex antialiased">
+<!-- SideNavBar Component -->
+<nav class="fixed left-0 top-0 h-full w-64 border-r border-outline-variant/30 bg-surface z-40 flex flex-col p-stack-md shadow-md">
+<!-- Header -->
+<div class="flex items-center gap-stack-sm mb-stack-lg">
+<div class="w-10 h-10 rounded-lg bg-primary-container text-on-primary-container flex items-center justify-center shadow-sm">
+<span class="material-symbols-outlined icon-fill">pulmonology</span>
+</div>
+<div>
+<h1 class="text-headline-md font-headline-md font-extrabold text-primary tracking-tight">CheXNet</h1>
+<p class="text-label-sm font-label-sm text-on-surface-variant">Hệ thống Chẩn đoán X-quang Ngực</p>
+</div>
+</div>
+<!-- CTA -->
+<button class="w-full bg-primary text-on-primary text-label-bold font-label-bold py-3 rounded-lg shadow-sm hover:bg-primary-fixed-variant transition-colors flex justify-center items-center gap-2 mb-stack-lg">
+<span class="material-symbols-outlined">add</span>
+            New Analysis
+        </button>
+<!-- Navigation Links -->
+<div class="flex flex-col gap-1 flex-1">
+<!-- Active Tab: Diagnostic Hub -->
+<a class="flex items-center gap-3 px-3 py-2 bg-primary/10 text-primary font-bold rounded-lg translate-x-1 duration-150" href="#">
+<span class="material-symbols-outlined icon-fill">monitor_heart</span>
+<span class="text-label-bold font-label-bold">Diagnostic Hub</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">history</span>
+<span class="text-label-bold font-label-bold">Patient History</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">science</span>
+<span class="text-label-bold font-label-bold">Research Portal</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">inventory_2</span>
+<span class="text-label-bold font-label-bold">System Archive</span>
+</a>
+</div>
+<!-- Footer Links -->
+<div class="flex flex-col gap-1 border-t border-outline-variant/30 pt-stack-md mt-auto">
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">help_outline</span>
+<span class="text-label-bold font-label-bold">Support</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">description</span>
+<span class="text-label-bold font-label-bold">Documentation</span>
+</a>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="ml-64 flex-1 flex flex-col h-full overflow-hidden bg-background">
+<!-- TopNavBar Component -->
+<header class="flex justify-between items-center w-full px-gutter h-16 sticky top-0 z-30 bg-white/70 backdrop-blur-xl border-b border-outline-variant/30 shadow-sm">
+<!-- Search Bar (on_left) -->
+<div class="flex-1 max-w-md">
+<div class="relative group">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline group-focus-within:text-primary transition-colors">search</span>
+<input class="w-full bg-surface-container-low border border-outline-variant/30 rounded-full py-2 pl-10 pr-4 text-body-md font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all" placeholder="Tìm kiếm bệnh nhân hoặc mã quét..." type="text"/>
+</div>
+</div>
+<!-- Trailing Actions -->
+<div class="flex items-center gap-stack-sm">
+<button class="p-2 rounded-full text-on-surface-variant hover:bg-primary-container/10 hover:text-primary transition-colors scale-95 active:opacity-80 relative">
+<span class="material-symbols-outlined">notifications</span>
+<span class="absolute top-1.5 right-1.5 w-2 h-2 bg-error rounded-full border border-white"></span>
+</button>
+<button class="p-2 rounded-full text-on-surface-variant hover:bg-primary-container/10 hover:text-primary transition-colors scale-95 active:opacity-80">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<div class="h-8 w-px bg-outline-variant/30 mx-2"></div>
+<button class="w-8 h-8 rounded-full bg-surface-container-highest border border-outline-variant/30 overflow-hidden scale-95 active:opacity-80 transition-all focus:ring-2 focus:ring-primary focus:ring-offset-2">
+<img alt="User profile avatar" class="w-full h-full object-cover" data-alt="A professional headshot of a medical practitioner in a clinical setting, soft lighting, sharp focus, professional attire." src="https://lh3.googleusercontent.com/aida-public/AB6AXuBjYwyZAUV2FFsHPticy4eaCCt9dp2jgV3tnKbsB3X66kDgUtbVe0LShIoOo6-p2uIvqFvsw5_TMfh2GmIoFCrSZQMtDOh2azGdw4_2gIvVFnneSW13cnya6Gty3QFaPloo4BQwSWSdwGOvk-PgAFd4yKFXrhO0p2bO1-mwqwf7t83XaAHZC-IJeWjLNeHLaH7ZHA-BqnZ3hBMiuySR1iLYuTfER4ZSEDCK3GO3cbHYwZgUizgNOTPzbXt2BrMOe_n-G5RH8exRS1jY"/>
+</button>
+</div>
+</header>
+<!-- Dashboard Workspace -->
+<div class="flex-1 p-gutter flex gap-gutter overflow-hidden">
+<!-- Left Column: Massive X-Ray Viewer (Bento Grid approach for the image container) -->
+<section class="flex-[2] flex flex-col bg-surface-container-lowest border border-outline-variant/30 rounded-xl shadow-sm overflow-hidden relative">
+<!-- Viewer Header -->
+<div class="px-stack-md py-stack-sm border-b border-outline-variant/30 bg-white/50 backdrop-blur-md flex justify-between items-center z-10">
+<div class="flex items-center gap-stack-sm">
+<span class="material-symbols-outlined text-primary">personal_injury</span>
+<div>
+<h2 class="text-label-bold font-label-bold text-on-surface">Bệnh nhân: PID-8924A</h2>
+<p class="text-label-sm font-label-sm text-secondary">Quét: 24 Tháng 10, 2023 • 08:42 SA</p>
+</div>
+</div>
+<div class="flex gap-2">
+<span class="px-2 py-1 rounded bg-primary/10 text-primary text-label-sm font-label-sm border border-primary/20">Chụp X-quang Lồng ngực (PA)</span>
+</div>
+</div>
+<!-- Main Image Area -->
+<div class="flex-1 bg-[#0a0a0a] relative overflow-hidden flex items-center justify-center group">
+<div class="absolute inset-0 bg-[url('https://images.unsplash.com/photo-1530497610245-94d3c16cda28?q=80&amp;w=1600&amp;auto=format&amp;fit=crop')] bg-cover bg-center bg-no-repeat opacity-90 transition-transform duration-700 ease-out group-hover:scale-105" data-alt="A highly detailed, realistic monochrome medical chest X-ray image displayed on a digital diagnostic monitor. The image shows clear rib structures, lungs, and heart shadow, typical of a standard anterior-posterior view. The aesthetic is clinical, stark, and high-contrast, fitting a professional medical software interface."></div>
+<!-- AI Bounding Box Overlay Simulation -->
+<div class="absolute top-1/4 left-1/3 w-1/4 h-1/3 border-2 border-error border-dashed rounded-lg bg-error/10 pointer-events-none animate-pulse">
+<div class="absolute -top-6 left-0 bg-error text-on-error text-label-sm font-label-sm px-2 py-0.5 rounded shadow-sm">Khí phế thũng</div>
+</div>
+<!-- Floating Tool Overlay (Glassmorphism) -->
+<div class="absolute right-stack-md top-stack-md bg-white/80 dark:bg-on-background/80 backdrop-blur-xl border border-outline-variant/30 rounded-lg p-1 flex flex-col gap-1 shadow-lg">
+<button class="p-2 rounded hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors group relative" title="Thu phóng">
+<span class="material-symbols-outlined">zoom_in</span>
+<span class="absolute right-full mr-2 top-1/2 -translate-y-1/2 bg-inverse-surface text-inverse-on-surface text-label-sm font-label-sm px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">Thu phóng</span>
+</button>
+<button class="p-2 rounded hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors group relative" title="Tương phản">
+<span class="material-symbols-outlined">contrast</span>
+<span class="absolute right-full mr-2 top-1/2 -translate-y-1/2 bg-inverse-surface text-inverse-on-surface text-label-sm font-label-sm px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">Tương phản</span>
+</button>
+<div class="w-full h-px bg-outline-variant/30 my-1"></div>
+<button class="p-2 rounded hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors group relative" title="Đảo ngược">
+<span class="material-symbols-outlined">invert_colors</span>
+<span class="absolute right-full mr-2 top-1/2 -translate-y-1/2 bg-inverse-surface text-inverse-on-surface text-label-sm font-label-sm px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">Đảo ngược</span>
+</button>
+<button class="p-2 rounded hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors group relative" title="Đo lường">
+<span class="material-symbols-outlined">straighten</span>
+</button>
+</div>
+</div>
+</section>
+<!-- Right Column: Analysis Results (Sleek Panel) -->
+<aside class="w-[420px] flex flex-col gap-stack-md h-full overflow-y-auto pr-2 pb-2">
+<!-- Probability Overview Card -->
+<div class="bg-surface-container-lowest border border-outline-variant/30 rounded-xl p-stack-md shadow-sm">
+<h3 class="text-headline-sm font-headline-md text-on-surface mb-stack-md flex items-center gap-2">
+<span class="material-symbols-outlined text-primary">analytics</span>
+                        Kết quả phân tích
+                    </h3>
+<div class="flex flex-col gap-stack-sm">
+<!-- High Probability -->
+<div class="group">
+<div class="flex justify-between items-end mb-1">
+<span class="text-label-bold font-label-bold text-error flex items-center gap-1">
+<span class="material-symbols-outlined text-[16px]">warning</span> Khí phế thũng
+                                </span>
+<span class="text-label-bold font-label-bold text-error">92%</span>
+</div>
+<div class="h-2 w-full bg-surface-container-high rounded-full overflow-hidden">
+<div class="h-full bg-error rounded-full w-0 transition-all duration-1000 ease-out" id="bar-emphysema"></div>
+</div>
+</div>
+<!-- Low Probability -->
+<div class="group mt-2">
+<div class="flex justify-between items-end mb-1">
+<span class="text-label-bold font-label-bold text-on-surface-variant">Tràn khí màng phổi</span>
+<span class="text-label-bold font-label-bold text-on-surface-variant">14%</span>
+</div>
+<div class="h-2 w-full bg-surface-container-high rounded-full overflow-hidden">
+<div class="h-full bg-primary/40 rounded-full w-0 transition-all duration-1000 ease-out delay-100" id="bar-pneumo"></div>
+</div>
+</div>
+<!-- Low Probability -->
+<div class="group mt-2">
+<div class="flex justify-between items-end mb-1">
+<span class="text-label-bold font-label-bold text-on-surface-variant">Phù nề</span>
+<span class="text-label-bold font-label-bold text-on-surface-variant">5%</span>
+</div>
+<div class="h-2 w-full bg-surface-container-high rounded-full overflow-hidden">
+<div class="h-full bg-primary/20 rounded-full w-0 transition-all duration-1000 ease-out delay-200" id="bar-edema"></div>
+</div>
+</div>
+</div>
+</div>
+<!-- Clinical Insight Details (Bento Style Card) -->
+<div class="bg-surface-container-lowest border border-error/30 rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col relative">
+<!-- Glassy header accent -->
+<div class="absolute top-0 left-0 w-full h-1 bg-error"></div>
+<div class="p-stack-md flex-1 overflow-y-auto">
+<div class="inline-flex items-center gap-1 px-2 py-1 bg-error/10 text-error text-label-sm font-label-sm rounded-md mb-3">
+<span class="material-symbols-outlined text-[14px]">priority_high</span> Phát hiện nghiêm trọng
+                        </div>
+<h4 class="text-headline-md font-headline-md text-on-surface mb-2">Khí phế thũng</h4>
+<div class="mb-stack-md">
+<h5 class="text-label-bold font-label-bold text-on-surface mb-1">Mô tả lâm sàng</h5>
+<p class="text-body-md font-body-md text-secondary leading-relaxed">
+                                Mô hình AI đã phát hiện các vùng tăng độ sáng (radioglucency) đáng kể ở thùy trên của cả hai phổi, gợi ý sự phá hủy phế nang đặc trưng của bệnh khí phế thũng. Có dấu hiệu làm phẳng vòm hoành và mở rộng khoang liên sườn, củng cố chẩn đoán bệnh phổi tắc nghẽn mãn tính (COPD).
+                            </p>
+</div>
+<div class="bg-surface-container-low rounded-lg p-3 border border-outline-variant/30">
+<h5 class="text-label-bold font-label-bold text-on-surface mb-2 flex items-center gap-2">
+<span class="material-symbols-outlined text-[18px]">checklist</span> Các bước tiếp theo đề xuất
+                            </h5>
+<ul class="flex flex-col gap-2">
+<li class="flex items-start gap-2 text-body-md font-body-md text-secondary">
+<div class="w-1.5 h-1.5 rounded-full bg-primary mt-2 flex-shrink-0"></div>
+<span>Tương quan với xét nghiệm chức năng hô hấp (PFT) lâm sàng.</span>
+</li>
+<li class="flex items-start gap-2 text-body-md font-body-md text-secondary">
+<div class="w-1.5 h-1.5 rounded-full bg-primary mt-2 flex-shrink-0"></div>
+<span>Đánh giá tiền sử hút thuốc và môi trường làm việc của bệnh nhân.</span>
+</li>
+<li class="flex items-start gap-2 text-body-md font-body-md text-secondary">
+<div class="w-1.5 h-1.5 rounded-full bg-primary mt-2 flex-shrink-0"></div>
+<span>Cân nhắc chụp CT ngực độ phân giải cao (HRCT) để đánh giá chi tiết mức độ tổn thương.</span>
+</li>
+</ul>
+</div>
+</div>
+<!-- Action Buttons -->
+<div class="p-stack-md bg-surface-container-low border-t border-outline-variant/30 flex gap-2">
+<button class="flex-1 bg-white border border-outline-variant/30 text-on-surface font-label-bold text-label-bold py-2 rounded-lg hover:bg-surface-container transition-colors shadow-sm">
+                            Bỏ qua
+                        </button>
+<button class="flex-1 bg-primary text-on-primary font-label-bold text-label-bold py-2 rounded-lg hover:bg-primary-fixed-variant transition-colors shadow-sm">
+                            Xác nhận &amp; Lưu
+                        </button>
+</div>
+</div>
+</aside>
+</div>
+<!-- System Metadata Footer -->
+<footer class="h-10 bg-surface-container-lowest border-t border-outline-variant/30 flex items-center justify-between px-gutter text-label-sm font-label-sm text-secondary shrink-0">
+<div class="flex items-center gap-4">
+<span class="flex items-center gap-1">
+<span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span>
+                    Hệ thống Trực tuyến
+                </span>
+<span class="w-px h-3 bg-outline-variant/50"></span>
+<span>Phiên bản mô hình: THX-Vision-v2.1.4</span>
+</div>
+<div class="flex items-center gap-4">
+<span class="flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">speed</span> Độ trễ suy luận: 124ms
+                </span>
+<span class="w-px h-3 bg-outline-variant/50"></span>
+<span>Độ tin cậy: Cao</span>
+</div>
+</footer>
+</main>
+<script>
+        // Trigger progress bar animations after load
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                document.getElementById('bar-emphysema').style.width = '92%';
+                document.getElementById('bar-pneumo').style.width = '14%';
+                document.getElementById('bar-edema').style.width = '5%';
+            }, 300);
+        });
+    </script>
+</body></html>

@@ -1,0 +1,509 @@
+openapi: 3.0.3
+info:
+  title: CheXNet V3 Clinical Precision AI API
+  description: Hệ thống API quản lý thông tin bệnh nhân, upload ảnh X-ray ngực và chẩn đoán bệnh lý tự động bằng mô hình AI ConvNeXtV2-Large.
+  version: 1.0.0
+servers:
+  - url: /api/v1
+    description: Development Server
+paths:
+  /auth/login:
+    post:
+      summary: Đăng nhập hệ thống
+      description: Xác thực người dùng bằng email và mật khẩu, trả về JWT access token và refresh token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: OBJECT
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: bacsi@chexnet.vn
+                password:
+                  type: string
+                  format: password
+                  example: Doctor@123456
+      responses:
+        '200':
+          description: Đăng nhập thành công
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Đăng nhập thành công
+                  data:
+                    type: object
+                    properties:
+                      token:
+                        type: string
+                        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                      refreshToken:
+                        type: string
+                        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                      user:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                            example: 650c3f7b2c589b21f8a8470a
+                          name:
+                            type: string
+                            example: BS. Nguyễn Văn Khoa
+                          email:
+                            type: string
+                            example: bacsi@chexnet.vn
+                          role:
+                            type: string
+                            example: doctor
+        '400':
+          description: Yêu cầu không hợp lệ hoặc thông tin trống
+        '401':
+          description: Email hoặc mật khẩu không chính xác
+
+  /auth/refresh-token:
+    post:
+      summary: Làm mới access token
+      description: Gửi refresh token qua cookie để lấy access token mới.
+      responses:
+        '200':
+          description: Cấp access token mới thành công
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Làm mới token thành công
+                  data:
+                    type: object
+                    properties:
+                      token:
+                        type: string
+                        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        '401':
+          description: Refresh token không hợp lệ hoặc đã hết hạn
+
+  /auth/logout:
+    post:
+      summary: Đăng xuất hệ thống
+      description: Hủy phiên đăng nhập hiện tại bằng cách tăng tokenVersion của người dùng.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Đăng xuất thành công
+        '401':
+          description: Chưa xác thực
+
+  /users:
+    get:
+      summary: Lấy danh sách tài khoản [ADMIN]
+      description: Chỉ tài khoản ADMIN được phép lấy danh sách bác sĩ và kỹ thuật viên.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: Thành công
+        '403':
+          description: Không có quyền truy cập (không phải admin)
+
+    post:
+      summary: Tạo tài khoản mới [ADMIN]
+      description: Chỉ tài khoản ADMIN được phép tạo tài khoản bác sĩ, kỹ thuật viên hoặc admin mới.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - email
+                - password
+                - role
+              properties:
+                name:
+                  type: string
+                  example: BS. Trần Thị Mai
+                email:
+                  type: string
+                  example: maitran@chexnet.vn
+                password:
+                  type: string
+                  example: Doctor@123
+                role:
+                  type: string
+                  enum: [admin, doctor, user]
+                  example: doctor
+                department:
+                  type: string
+                  example: Chẩn Đoán Hình Ảnh
+      responses:
+        '201':
+          description: Tạo thành công
+        '400':
+          description: Email đã được sử dụng hoặc dữ liệu lỗi
+
+  /patients:
+    get:
+      summary: Danh sách hồ sơ bệnh nhân
+      description: Lấy danh sách bệnh nhân có hỗ trợ tìm kiếm theo tên/mã, lọc theo mức độ rủi ro, phân trang.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+        - name: keyword
+          in: query
+          description: Tìm kiếm theo tên hoặc mã bệnh nhân (không dấu tiếng Việt)
+          schema:
+            type: string
+        - name: riskLevel
+          in: query
+          schema:
+            type: string
+            enum: [low, medium, high]
+      responses:
+        '200':
+          description: Thành công
+
+    post:
+      summary: Tạo hồ sơ bệnh nhân mới
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - gender
+                - age
+                - bloodType
+              properties:
+                name:
+                  type: string
+                  example: Hoàng Văn Nam
+                gender:
+                  type: string
+                  enum: [male, female, other]
+                  example: male
+                age:
+                  type: integer
+                  example: 34
+                bloodType:
+                  type: string
+                  example: O+
+                phone:
+                  type: string
+                  example: '0988776655'
+                department:
+                  type: string
+                  example: Khoa Phổi
+                vitals:
+                  type: object
+                  properties:
+                    heartRate:
+                      type: integer
+                      example: 78
+                    bloodPressure:
+                      type: string
+                      example: 120/80
+                    spo2:
+                      type: integer
+                      example: 98
+                    temperature:
+                      type: number
+                      example: 36.6
+      responses:
+        '210':
+          description: Tạo thành công
+
+  /patients/{id}:
+    get:
+      summary: Lấy chi tiết bệnh nhân kèm lịch sử scans & chẩn đoán
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Thành công
+
+    patch:
+      summary: Cập nhật hồ sơ bệnh nhân & sinh hiệu (Vitals)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                phone:
+                  type: string
+                vitals:
+                  type: object
+                  properties:
+                    heartRate:
+                      type: integer
+                    bloodPressure:
+                      type: string
+                    spo2:
+                      type: integer
+                    temperature:
+                      type: number
+      responses:
+        '200':
+          description: Cập nhật thành công
+
+  /scans/{patientId}/upload:
+    post:
+      summary: Upload ảnh X-ray ngực để phân tích AI
+      description: Upload tệp ảnh dạng multipart/form-data. Tiến trình AI sẽ được kích hoạt bất đồng bộ ngay sau khi upload thành công.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                type:
+                  type: string
+                  enum: [PA, AP, Lateral]
+                  default: PA
+                notes:
+                  type: string
+                  example: Nghi ngờ viêm phổi thùy
+      responses:
+        '200':
+          description: Upload thành công, đang chạy AI
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Upload ảnh X-ray thành công, đang phân tích AI...
+                  data:
+                    type: object
+                    properties:
+                      _id:
+                        type: string
+                        example: 650c3f7b2c589b21f8a8470f
+                      status:
+                        type: string
+                        example: processing
+
+  /scans/{patientId}:
+    get:
+      summary: Lấy danh sách lượt chụp X-ray của bệnh nhân
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Thành công
+
+  /diagnoses/by-patient/{patientId}:
+    get:
+      summary: Lấy toàn bộ chẩn đoán của một bệnh nhân
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Thành công
+
+  /diagnoses/{id}:
+    get:
+      summary: Chi tiết 1 kết quả chẩn đoán AI
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Thành công
+
+  /diagnoses/{id}/verify:
+    patch:
+      summary: Bác sĩ xác nhận kết quả chẩn đoán AI
+      description: Cho phép bác sĩ duyệt kết quả, sửa đổi/thêm ghi chú hoặc trạng thái duyệt.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - status
+              properties:
+                status:
+                  type: string
+                  enum: [verified, flagged]
+                  example: verified
+                notes:
+                  type: string
+                  example: Bác sĩ đồng ý hoàn toàn với kết quả phân tích AI
+      responses:
+        '200':
+          description: Xác nhận thành công
+
+  /research/stats:
+    get:
+      summary: Thống kê chỉ số nghiên cứu tổng quan [DOCTOR/ADMIN]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Thành công
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      totalScans:
+                        type: integer
+                        example: 125
+                      aiAccuracy:
+                        type: number
+                        example: 0.92
+                      avgLatency:
+                        type: number
+                        example: 1.24
+                      trendingGrowth:
+                        type: number
+                        example: 14.5
+
+  /research/trends:
+    get:
+      summary: Thống kê xu hướng bệnh 8 tuần gần đây [DOCTOR/ADMIN]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Thành công
+
+  /research/heatmap:
+    get:
+      summary: Lấy dữ liệu mật độ phân bố bệnh (Heatmap) [DOCTOR/ADMIN]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Thành công
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

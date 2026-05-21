@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+
+<html lang="vi"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Cấu hình Hệ thống Chẩn đoán X-quang Phổi CheXNet</title>
+<!-- Google Fonts & Material Symbols -->
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Manrope:wght@600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<!-- Theme Configuration -->
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "on-error-container": "#93000a",
+              "on-primary": "#ffffff",
+              "on-background": "#191c1e",
+              "on-error": "#ffffff",
+              "primary": "#004ac6",
+              "primary-container": "#2563eb",
+              "tertiary": "#943700",
+              "inverse-primary": "#b4c5ff",
+              "outline-variant": "#c3c6d7",
+              "on-secondary": "#ffffff",
+              "tertiary-container": "#bc4800",
+              "on-secondary-fixed-variant": "#3f465c",
+              "inverse-surface": "#2d3133",
+              "on-surface": "#191c1e",
+              "secondary": "#565e74",
+              "surface-container-high": "#e6e8ea",
+              "background": "#f7f9fb",
+              "surface-bright": "#f7f9fb",
+              "surface-container-highest": "#e0e3e5",
+              "primary-fixed": "#dbe1ff",
+              "secondary-fixed-dim": "#bec6e0",
+              "surface-container-lowest": "#ffffff",
+              "error-container": "#ffdad6",
+              "on-tertiary-container": "#ffede6",
+              "primary-fixed-dim": "#b4c5ff",
+              "surface-container": "#eceef0",
+              "outline": "#737686",
+              "surface-dim": "#d8dadc",
+              "surface": "#f7f9fb",
+              "on-surface-variant": "#434655",
+              "tertiary-fixed-dim": "#ffb596",
+              "secondary-container": "#dae2fd",
+              "surface-container-low": "#f2f4f6",
+              "on-secondary-fixed": "#131b2e",
+              "on-tertiary-fixed-variant": "#7d2d00",
+              "surface-tint": "#0053db",
+              "inverse-on-surface": "#eff1f3",
+              "on-secondary-container": "#5c647a",
+              "secondary-fixed": "#dae2fd",
+              "on-tertiary": "#ffffff",
+              "tertiary-fixed": "#ffdbcd",
+              "on-primary-container": "#eeefff",
+              "surface-variant": "#e0e3e5",
+              "on-primary-fixed": "#00174b",
+              "error": "#ba1a1a",
+              "on-primary-fixed-variant": "#003ea8",
+              "on-tertiary-fixed": "#360f00"
+            },
+            borderRadius: {
+              DEFAULT: "0.125rem",
+              lg: "0.25rem",
+              xl: "0.5rem",
+              full: "0.75rem"
+            },
+            spacing: {
+              "margin": "32px",
+              "base": "4px",
+              "container-max": "1440px",
+              "stack-sm": "8px",
+              "stack-md": "16px",
+              "stack-lg": "32px",
+              "gutter": "24px"
+            },
+            fontFamily: {
+              "headline-md": ["Manrope"],
+              "display-lg": ["Manrope"],
+              "body-lg": ["Inter"],
+              "headline-lg-mobile": ["Manrope"],
+              "label-bold": ["Inter"],
+              "body-md": ["Inter"],
+              "label-sm": ["Inter"],
+              "headline-lg": ["Manrope"]
+            },
+            fontSize: {
+              "headline-md": ["24px", { lineHeight: "1.3", letterSpacing: "-0.02em", fontWeight: "600" }],
+              "display-lg": ["48px", { lineHeight: "1.1", letterSpacing: "-0.03em", fontWeight: "700" }],
+              "body-lg": ["18px", { lineHeight: "1.6", letterSpacing: "-0.01em", fontWeight: "400" }],
+              "headline-lg-mobile": ["28px", { lineHeight: "1.2", letterSpacing: "-0.02em", fontWeight: "600" }],
+              "label-bold": ["14px", { lineHeight: "1.4", letterSpacing: "0.01em", fontWeight: "600" }],
+              "body-md": ["16px", { lineHeight: "1.5", letterSpacing: "-0.01em", fontWeight: "400" }],
+              "label-sm": ["12px", { lineHeight: "1.4", letterSpacing: "0.02em", fontWeight: "500" }],
+              "headline-lg": ["32px", { lineHeight: "1.2", letterSpacing: "-0.02em", fontWeight: "600" }]
+            }
+          }
+        }
+      }
+    </script>
+<style>
+      /* Custom Slider Styles for Medical Precision Vibe */
+      input[type=range] {
+        -webkit-appearance: none;
+        width: 100%;
+        background: transparent;
+      }
+      input[type=range]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        height: 20px;
+        width: 20px;
+        border-radius: 50%;
+        background: #004ac6; /* primary */
+        cursor: pointer;
+        margin-top: -8px;
+        box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.2);
+        transition: transform 0.1s;
+      }
+      input[type=range]::-webkit-slider-thumb:hover {
+        transform: scale(1.1);
+      }
+      input[type=range]::-webkit-slider-runnable-track {
+        width: 100%;
+        height: 4px;
+        cursor: pointer;
+        background: #c3c6d7; /* outline-variant */
+        border-radius: 2px;
+      }
+      
+      /* Toggle Switch */
+      .toggle-checkbox:checked {
+        right: 0;
+        border-color: #004ac6;
+      }
+      .toggle-checkbox:checked + .toggle-label {
+        background-color: #004ac6;
+      }
+      
+      /* Medical Background Pattern */
+      .bg-medical-grid {
+        background-image: linear-gradient(to right, #eceef0 1px, transparent 1px), linear-gradient(to bottom, #eceef0 1px, transparent 1px);
+        background-size: 24px 24px;
+      }
+
+      /* Animation for monitor */
+      @keyframes pulse-emerald {
+        0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+        70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+      }
+      .status-pulse {
+        animation: pulse-emerald 2s infinite;
+      }
+    </style>
+</head>
+<body class="bg-background text-on-background antialiased selection:bg-primary-container selection:text-on-primary-container flex min-h-screen">
+<!-- JSON: SideNavBar Component -->
+<!-- Applying style_shell_layout, style_bg_color, style_component_shape -->
+<nav aria-label="Sidebar Navigation" class="fixed left-0 top-0 h-full flex flex-col p-stack-md z-40 bg-surface h-screen w-64 border-r border-outline-variant/30 hidden md:flex">
+<!-- Header -->
+<div class="flex items-center gap-stack-sm mb-stack-lg p-base">
+<div class="w-10 h-10 rounded-lg bg-primary-container text-on-primary-container flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined" data-icon="hub">biotech</span>
+</div>
+<div>
+<!-- style_brand_logo -->
+<h1 class="text-headline-md font-headline-md font-extrabold text-primary">CheXNet</h1>
+<p class="text-label-sm font-label-sm text-secondary">Chẩn đoán X-quang Phổi</p>
+</div>
+</div>
+<!-- CTA -->
+<button class="w-full bg-primary text-on-primary py-2 px-4 rounded-full font-label-bold text-label-bold flex items-center justify-center gap-2 mb-stack-lg shadow-sm hover:opacity-90 transition-opacity">
+<span class="material-symbols-outlined text-[18px]">add</span>
+            New Analysis
+        </button>
+<!-- Main Navigation Links -->
+<div class="flex-1 flex flex-col gap-base">
+<!-- style_typography: Labels -->
+<!-- Item 1: Inactive -->
+<a class="flex items-center gap-stack-sm px-3 py-2 rounded-lg text-label-bold font-label-bold text-on-secondary-container hover:bg-surface-container-high transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="monitor_heart">monitor_heart</span>
+                Diagnostic Hub
+            </a>
+<!-- Item 2: Inactive -->
+<a class="flex items-center gap-stack-sm px-3 py-2 rounded-lg text-label-bold font-label-bold text-on-secondary-container hover:bg-surface-container-high transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="history">history</span>
+                Patient History
+            </a>
+<!-- Item 3: Inactive -->
+<a class="flex items-center gap-stack-sm px-3 py-2 rounded-lg text-label-bold font-label-bold text-on-secondary-container hover:bg-surface-container-high transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="science">science</span>
+                Research Portal
+            </a>
+<!-- Item 4: Active (System Archive maps closest to System Configuration conceptually in this structure) -->
+<!-- style_active_navigation -->
+<a class="flex items-center gap-stack-sm px-3 py-2 text-label-bold font-label-bold bg-primary/10 text-primary font-bold rounded-lg transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="inventory_2" style="font-variation-settings: 'FILL' 1;">inventory_2</span>
+                System Archive
+            </a>
+</div>
+<!-- Footer Links (Separation Logic visually via margin) -->
+<div class="mt-auto pt-stack-md border-t border-outline-variant/30 flex flex-col gap-base">
+<a class="flex items-center gap-stack-sm px-3 py-2 rounded-lg text-label-bold font-label-bold text-on-secondary-container hover:bg-surface-container-high transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="help_outline">help_outline</span>
+                Support
+            </a>
+<a class="flex items-center gap-stack-sm px-3 py-2 rounded-lg text-label-bold font-label-bold text-on-secondary-container hover:bg-surface-container-high transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="description">description</span>
+                Documentation
+            </a>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="flex-1 flex flex-col min-w-0 md:ml-64 bg-medical-grid relative">
+<!-- Ambient Glassmorphism Background Glows -->
+<div class="absolute top-0 left-0 w-[500px] h-[500px] bg-primary/5 rounded-[100%] blur-[100px] pointer-events-none"></div>
+<div class="absolute bottom-0 right-0 w-[600px] h-[600px] bg-secondary-fixed/30 rounded-[100%] blur-[120px] pointer-events-none"></div>
+<!-- JSON: TopNavBar Component -->
+<!-- style_shell_layout, style_component_shape, style_bg_color, style_separation_logic, style_shadows_and_elevation -->
+<header class="flex justify-between items-center w-full px-gutter h-16 sticky top-0 z-50 docked full-width top-0 bg-white/70 backdrop-blur-xl border-b border-outline-variant/30 shadow-sm">
+<!-- Left: Search Bar -->
+<div class="flex-1 max-w-md">
+<div class="relative flex items-center w-full h-10 rounded-lg bg-surface-container-low border border-outline-variant/50 focus-within:border-primary focus-within:ring-1 focus-within:ring-primary overflow-hidden transition-all">
+<div class="grid place-items-center h-full w-10 text-on-surface-variant">
+<span class="material-symbols-outlined text-[20px]" data-icon="search">search</span>
+</div>
+<input class="peer h-full w-full outline-none text-body-md font-body-md text-on-surface bg-transparent pr-2" id="search" placeholder="Tìm kiếm cài đặt hệ thống..." type="text"/>
+</div>
+</div>
+<!-- Right: Actions & Profile -->
+<div class="flex items-center gap-stack-md ml-auto">
+<button aria-label="Notifications" class="w-10 h-10 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-primary-container/10 transition-colors scale-95 active:opacity-80">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+</button>
+<button aria-label="Settings" class="w-10 h-10 rounded-full flex items-center justify-center text-on-surface-variant hover:bg-primary-container/10 transition-colors scale-95 active:opacity-80">
+<span class="material-symbols-outlined" data-icon="settings" style="font-variation-settings: 'FILL' 1;">settings</span>
+</button>
+<div class="h-8 w-px bg-outline-variant/50 mx-2"></div>
+<div class="w-8 h-8 rounded-full bg-surface-variant border border-outline-variant/50 overflow-hidden shrink-0 shadow-sm cursor-pointer hover:ring-2 hover:ring-primary transition-all">
+<!-- Placeholder for User Avatar, skipping img generation as per instructions regarding bloat unless explicitly requested, using an icon instead -->
+<div class="w-full h-full flex items-center justify-center text-on-surface-variant bg-surface-container-highest">
+<span class="material-symbols-outlined text-[20px]" data-icon="person">person</span>
+</div>
+</div>
+</div>
+</header>
+<!-- Page Content -->
+<div class="p-margin max-w-container-max mx-auto w-full relative z-10">
+<!-- Page Header -->
+<div class="mb-stack-lg">
+<h2 class="text-headline-lg font-headline-lg text-on-surface mb-stack-sm tracking-tight">Cấu hình Hệ thống Chẩn đoán X-quang Phổi CheXNet</h2>
+<p class="text-body-lg font-body-lg text-on-surface-variant max-w-3xl">Quản lý tham số phân tích AI, tài nguyên máy chủ và ngưỡng chẩn đoán lâm sàng ảnh X-quang phổi.</p>
+</div>
+<!-- Bento Grid Layout -->
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-gutter">
+<!-- Server Health Monitor (Spans 8 columns on large screens) -->
+<div class="lg:col-span-8 bg-surface-container-lowest rounded-xl border border-outline-variant/40 shadow-sm overflow-hidden flex flex-col backdrop-blur-md">
+<!-- Monitor Header -->
+<div class="border-b border-outline-variant/20 px-stack-md py-stack-sm flex items-center justify-between bg-surface-container-low/50">
+<div class="flex items-center gap-stack-sm">
+<span class="material-symbols-outlined text-secondary" data-icon="dns">dns</span>
+<h3 class="text-label-bold font-label-bold text-on-surface uppercase tracking-wider">Sức khỏe Máy chủ</h3>
+</div>
+<div class="flex items-center gap-2">
+<div class="w-2.5 h-2.5 rounded-full bg-emerald-500 status-pulse"></div>
+<span class="text-label-sm font-label-sm text-secondary uppercase">Hệ thống Ổn định</span>
+</div>
+</div>
+<!-- Monitor Body -->
+<div class="p-stack-lg grid grid-cols-1 md:grid-cols-3 gap-gutter">
+<!-- Metric: GPU Load -->
+<div class="flex flex-col">
+<div class="flex justify-between items-end mb-2">
+<span class="text-label-bold font-label-bold text-on-surface-variant">Tải GPU (Cluster A)</span>
+<span class="text-headline-md font-headline-md text-primary font-bold">42%</span>
+</div>
+<div class="w-full bg-surface-container-highest rounded-full h-2.5 mb-1 overflow-hidden">
+<div class="bg-primary h-2.5 rounded-full" style="width: 42%"></div>
+</div>
+<p class="text-[10px] font-label-sm text-secondary text-right">Tối ưu cho chẩn đoán</p>
+</div>
+<!-- Metric: RAM Usage -->
+<div class="flex flex-col">
+<div class="flex justify-between items-end mb-2">
+<span class="text-label-bold font-label-bold text-on-surface-variant">Mức sử dụng RAM</span>
+<span class="text-headline-md font-headline-md text-on-surface font-bold">68%</span>
+</div>
+<div class="w-full bg-surface-container-highest rounded-full h-2.5 mb-1 overflow-hidden flex">
+<div class="bg-primary h-2.5" style="width: 50%"></div>
+<div class="bg-primary-fixed-dim h-2.5" style="width: 18%"></div>
+</div>
+<p class="text-[10px] font-label-sm text-secondary text-right">Dành trước 12GB Cache</p>
+</div>
+<!-- Metric: API Latency -->
+<div class="flex flex-col bg-surface-container px-stack-md py-stack-sm rounded-lg border border-outline-variant/20">
+<span class="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-wider mb-1">Độ trễ API</span>
+<div class="flex items-baseline gap-1">
+<span class="text-headline-lg font-headline-lg text-on-surface">14</span>
+<span class="text-label-bold font-label-bold text-secondary">ms</span>
+</div>
+<div class="mt-2 flex items-center gap-1 text-[11px] text-emerald-600 font-medium">
+<span class="material-symbols-outlined text-[14px]" data-icon="trending_down">trending_down</span>
+<span>-2ms so với hôm qua</span>
+</div>
+</div>
+</div>
+</div>
+<!-- System Info Card (Spans 4 columns) -->
+<div class="lg:col-span-4 bg-primary text-on-primary rounded-xl p-stack-lg shadow-sm relative overflow-hidden flex flex-col justify-between">
+<!-- Background texture -->
+<div class="absolute inset-0 opacity-10 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iMiIgY3k9IjIiIHI9IjIiIGZpbGw9IiNmZmYiLz48L3N2Zz4=')]"></div>
+<div class="relative z-10 mb-stack-lg">
+<div class="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-lg flex items-center justify-center mb-stack-md">
+<span class="material-symbols-outlined text-[28px]" data-icon="security">security</span>
+</div>
+<h3 class="text-headline-md font-headline-md font-bold mb-1">Chứng chỉ y tế</h3>
+<p class="text-body-md font-body-md text-primary-fixed opacity-90">Hệ thống tuân thủ tiêu chuẩn HIPAA &amp; GDPR đối với dữ liệu hình ảnh X-quang DICOM.</p>
+</div>
+<div class="relative z-10 flex items-center justify-between border-t border-white/20 pt-stack-md">
+<div>
+<p class="text-label-sm font-label-sm text-primary-fixed uppercase tracking-wider mb-1">Phiên bản Model</p>
+<p class="text-label-bold font-label-bold">CheXNet-Lung-V3</p>
+</div>
+<button class="px-4 py-1.5 bg-white text-primary rounded-full text-label-sm font-label-bold hover:bg-primary-fixed transition-colors">
+                            Cập nhật
+                        </button>
+</div>
+</div>
+<!-- Confidence Thresholds (Spans 12 columns) -->
+<div class="lg:col-span-12 bg-surface-container-lowest rounded-xl border border-outline-variant/40 shadow-sm p-stack-lg">
+<div class="mb-stack-md flex items-center gap-stack-sm border-b border-outline-variant/20 pb-stack-sm">
+<span class="material-symbols-outlined text-secondary" data-icon="tune">tune</span>
+<h3 class="text-label-bold font-label-bold text-on-surface uppercase tracking-wider">Ngưỡng Tin cậy AI (Confidence Thresholds)</h3>
+</div>
+<p class="text-body-sm font-body-md text-secondary mb-stack-lg max-w-4xl">Điều chỉnh độ nhạy của thuật toán phát hiện bất thường trên ảnh X-quang phổi. Mức độ nhạy cao hơn sẽ làm tăng cảnh báo dương tính giả (false positives) nhưng giảm thiểu rủi ro bỏ sót tổn thương.</p>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-x-gutter gap-y-stack-lg">
+<!-- Slider 1 -->
+<div class="flex flex-col gap-2 p-stack-md bg-surface-container rounded-lg border border-outline-variant/20">
+<div class="flex justify-between items-center">
+<label class="text-label-bold font-label-bold text-on-surface" for="threshold-nodule">Phát hiện Nốt mờ (Nodules)</label>
+<span class="bg-primary/10 text-primary px-2 py-0.5 rounded text-label-sm font-label-bold" id="val-nodule">85%</span>
+</div>
+<input class="w-full mt-2" id="threshold-nodule" max="99" min="50" oninput="document.getElementById('val-nodule').innerText = this.value + '%'" type="range" value="85"/>
+<div class="flex justify-between text-[11px] text-secondary mt-1">
+<span>Độ nhạy Cao</span>
+<span>Độ đặc hiệu Cao</span>
+</div>
+</div>
+<!-- Slider 2 -->
+<div class="flex flex-col gap-2 p-stack-md bg-surface-container rounded-lg border border-outline-variant/20">
+<div class="flex justify-between items-center">
+<label class="text-label-bold font-label-bold text-on-surface" for="threshold-pleural">Tràn dịch màng phổi</label>
+<span class="bg-primary/10 text-primary px-2 py-0.5 rounded text-label-sm font-label-bold" id="val-pleural">92%</span>
+</div>
+<input class="w-full mt-2" id="threshold-pleural" max="99" min="50" oninput="document.getElementById('val-pleural').innerText = this.value + '%'" type="range" value="92"/>
+<div class="flex justify-between text-[11px] text-secondary mt-1">
+<span>Độ nhạy Cao</span>
+<span>Độ đặc hiệu Cao</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Toggles & Quick Settings (Spans 12 columns) -->
+<div class="lg:col-span-12 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-gutter">
+<!-- Toggle Card 1 -->
+<div class="bg-surface-container-lowest rounded-xl border border-outline-variant/40 p-stack-md flex items-center justify-between hover:shadow-sm transition-shadow">
+<div class="pr-4">
+<p class="text-label-bold font-label-bold text-on-surface mb-1">Tiền xử lý Ảnh tự động</p>
+<p class="text-[12px] text-secondary leading-tight">Tự động cân bằng sáng tối cho file DICOM gốc.</p>
+</div>
+<!-- Custom Toggle -->
+<div class="relative inline-block w-12 mr-2 align-middle select-none transition duration-200 ease-in shrink-0">
+<input checked="" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 appearance-none cursor-pointer z-10 transition-transform duration-200 ease-in-out peer" id="toggle1" name="toggle1" type="checkbox"/>
+<label class="toggle-label block overflow-hidden h-6 rounded-full bg-surface-variant cursor-pointer peer-checked:bg-primary transition-colors duration-200 ease-in-out" for="toggle1"></label>
+</div>
+</div>
+<!-- Toggle Card 2 -->
+<div class="bg-surface-container-lowest rounded-xl border border-outline-variant/40 p-stack-md flex items-center justify-between hover:shadow-sm transition-shadow">
+<div class="pr-4">
+<p class="text-label-bold font-label-bold text-on-surface mb-1">Gửi dữ liệu Ẩn danh</p>
+<p class="text-[12px] text-secondary leading-tight">Góp phần cải thiện mô hình AI cục bộ.</p>
+</div>
+<!-- Custom Toggle -->
+<div class="relative inline-block w-12 mr-2 align-middle select-none transition duration-200 ease-in shrink-0">
+<input class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 appearance-none cursor-pointer z-10 transition-transform duration-200 ease-in-out peer" id="toggle2" name="toggle2" type="checkbox"/>
+<label class="toggle-label block overflow-hidden h-6 rounded-full bg-surface-variant cursor-pointer peer-checked:bg-primary transition-colors duration-200 ease-in-out" for="toggle2"></label>
+</div>
+</div>
+<!-- Action Card -->
+<div class="bg-error-container/20 rounded-xl border border-error-container p-stack-md flex flex-col justify-center items-start">
+<p class="text-label-bold font-label-bold text-on-error-container mb-1 flex items-center gap-1">
+<span class="material-symbols-outlined text-[16px]">warning</span> Khu vực Nguy hiểm
+                        </p>
+<button class="mt-2 px-4 py-2 border border-on-error-container/50 text-on-error-container rounded-lg text-label-bold font-label-bold hover:bg-on-error-container hover:text-white transition-colors w-full">
+                            Khởi động lại Core Engine
+                        </button>
+</div>
+</div>
+</div>
+<!-- Footer Actions -->
+<div class="mt-stack-lg flex justify-end gap-stack-sm pb-margin border-t border-outline-variant/30 pt-stack-md">
+<button class="px-6 py-2.5 rounded-lg border border-outline-variant text-on-surface-variant font-label-bold text-label-bold hover:bg-surface-container-high transition-colors">
+                    Hủy bỏ
+                </button>
+<button class="px-6 py-2.5 rounded-lg bg-primary text-on-primary font-label-bold text-label-bold hover:opacity-90 shadow-sm transition-opacity">
+                    Lưu Cấu hình
+                </button>
+</div>
+</div>
+</main>
+<!-- Micro-interaction Script for custom toggle visuals (if needed beyond CSS) -->
+<script>
+        // Ensure checkboxes align correctly with the custom CSS
+        const checkboxes = document.querySelectorAll('.toggle-checkbox');
+        checkboxes.forEach(cb => {
+            cb.addEventListener('change', function() {
+                if(this.checked) {
+                    this.style.transform = 'translateX(100%)';
+                    this.style.borderColor = '#004ac6';
+                } else {
+                    this.style.transform = 'translateX(0)';
+                    this.style.borderColor = 'transparent';
+                }
+            });
+            // Init state
+            if(cb.checked) {
+                cb.style.transform = 'translateX(100%)';
+                cb.style.borderColor = '#004ac6';
+            } else {
+                cb.style.borderColor = 'transparent';
+            }
+        });
+    </script>
+</body></html>

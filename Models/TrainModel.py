@@ -623,14 +623,40 @@ class ChexnetTrainer:
         # ---- Load Model
         print(f"\n📥 Loading model from: {pathModel}")
         
-        model = ConvNeXtV2Model(num_classes=nnClassCount, pretrained=False).to(device)
-        
         if not os.path.exists(pathModel):
             raise FileNotFoundError(f"Model file not found: {pathModel}")
         
         try:
             ckpt = torch.load(pathModel, map_location=device, weights_only=False)
             state_dict = ckpt.get('state_dict', ckpt)  # Handle both formats
+            
+            # Check if weights belong to DenseNet-121 or ConvNeXtV2
+            is_densenet = any(k.startswith('densenet121.') for k in state_dict.keys())
+            
+            if is_densenet:
+                print("🔍 Detected DenseNet-121 architecture (Classical CheXNet)")
+                if transCrop != 224:
+                    print(f"⚠️ Overriding image size from {transCrop} to 224 for DenseNet-121 compatibility.")
+                    transCrop = 224
+                
+                import torchvision.models as models
+                
+                class DenseNet121Wrapper(nn.Module):
+                    def __init__(self, num_classes=15):
+                        super(DenseNet121Wrapper, self).__init__()
+                        self.densenet121 = models.densenet121(weights=None)
+                        num_ftrs = self.densenet121.classifier.in_features
+                        self.densenet121.classifier = nn.Sequential(
+                            nn.Linear(num_ftrs, num_classes)
+                        )
+                    
+                    def forward(self, x):
+                        return self.densenet121(x)
+                
+                model = DenseNet121Wrapper(num_classes=nnClassCount).to(device)
+            else:
+                print("🔍 Detected ConvNeXtV2 architecture")
+                model = ConvNeXtV2Model(num_classes=nnClassCount, pretrained=False).to(device)
             
             # Handle torch.compile() prefix (_orig_mod.)
             if any(k.startswith('_orig_mod.') for k in state_dict.keys()):

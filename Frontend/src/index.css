@@ -1,0 +1,166 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Material symbols override */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  user-select: none;
+}
+.icon-fill {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Dark Mode Global Overrides */
+html.dark body {
+  background: #1a1d27 !important;
+  color: #ffffff !important;
+}
+html.dark .bg-white {
+  background-color: #232736 !important;
+  color: #ffffff !important;
+}
+html.dark .text-gray-900, html.dark .text-gray-800 {
+  color: #f3f4f6 !important;
+}
+
+html.dark .ant-select-selector, html.dark .ant-input, html.dark .ant-picker, html.dark .ant-input-number-input {
+  background-color: #1a1d27 !important;
+  border-color: #374151 !important;
+  color: #ffffff !important;
+}
+
+/* Custom Table Premium Framework */
+.custom-table .ant-table {
+  background: transparent !important;
+}
+.custom-table .ant-table-thead > tr > th {
+  background: #f8fafc !important;
+  color: #64748b !important;
+  font-weight: 700 !important;
+  text-transform: uppercase;
+  font-size: 11px;
+  border-bottom: 1px solid #e2e8f0 !important;
+}
+
+html.dark .custom-table .ant-table-thead > tr > th {
+  background: #1a1d27 !important;
+  color: #94a3b8 !important;
+  border-bottom: 1px solid #374151 !important;
+}
+
+.custom-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #f1f5f9 !important;
+}
+
+html.dark .custom-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #374151 !important;
+  color: #e2e8f0 !important;
+}
+
+html.dark .custom-table .ant-table-tbody > tr:hover > td {
+  background-color: rgba(55, 65, 81, 0.3) !important;
+}
+
+/* Glassmorphism Framework */
+.glass-card {
+  background: rgba(255, 255, 255, 0.7) !important;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.4) !important;
+}
+
+html.dark .glass-card {
+  background: rgba(35, 39, 54, 0.8) !important;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Medical background pattern */
+.bg-medical-grid {
+  background-image: linear-gradient(to right, rgba(229, 231, 235, 0.5) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(229, 231, 235, 0.5) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+html.dark .bg-medical-grid {
+  background-image: linear-gradient(to right, rgba(55, 65, 81, 0.15) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(55, 65, 81, 0.15) 1px, transparent 1px);
+}
+
+/* Custom transitions and sliders */
+input[type=range] {
+  -webkit-appearance: none;
+  width: 100%;
+  background: transparent;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 18px;
+  width: 18px;
+  border-radius: 50%;
+  background: #004ac6;
+  cursor: pointer;
+  margin-top: -7px;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.15);
+  transition: transform 0.1s;
+}
+input[type=range]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+input[type=range]::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 4px;
+  cursor: pointer;
+  background: #cbd5e1;
+  border-radius: 2px;
+}
+html.dark input[type=range]::-webkit-slider-runnable-track {
+  background: #475569;
+}
+
+/* Toggle Switch standard classes */
+.toggle-checkbox:checked {
+  transform: translateX(100%);
+  border-color: #004ac6;
+}
+.toggle-checkbox:checked + .toggle-label {
+  background-color: #004ac6;
+}
+
+/* Antd dark mode overrides */
+html.dark .ant-card {
+  background-color: #232736 !important;
+  color: #ffffff !important;
+  border-color: #374151 !important;
+}
+
+html.dark .ant-card-head {
+  border-bottom-color: #374151 !important;
+  color: #ffffff !important;
+}
+
+/* Animations */
+@keyframes pulse-emerald {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+.status-pulse {
+  animation: pulse-emerald 2s infinite;
+}

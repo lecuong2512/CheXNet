@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+
+<html class="light" lang="vi"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>CheXNet - Lịch sử Phân tích X-quang Ngực</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Manrope:wght@600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-error-container": "#93000a",
+                        "on-primary": "#ffffff",
+                        "on-background": "#191c1e",
+                        "on-error": "#ffffff",
+                        "primary": "#004ac6",
+                        "primary-container": "#2563eb",
+                        "tertiary": "#943700",
+                        "inverse-primary": "#b4c5ff",
+                        "outline-variant": "#c3c6d7",
+                        "on-secondary": "#ffffff",
+                        "tertiary-container": "#bc4800",
+                        "on-secondary-fixed-variant": "#3f465c",
+                        "inverse-surface": "#2d3133",
+                        "on-surface": "#191c1e",
+                        "secondary": "#565e74",
+                        "surface-container-high": "#e6e8ea",
+                        "background": "#f7f9fb",
+                        "surface-bright": "#f7f9fb",
+                        "surface-container-highest": "#e0e3e5",
+                        "primary-fixed": "#dbe1ff",
+                        "secondary-fixed-dim": "#bec6e0",
+                        "surface-container-lowest": "#ffffff",
+                        "error-container": "#ffdad6",
+                        "on-tertiary-container": "#ffede6",
+                        "primary-fixed-dim": "#b4c5ff",
+                        "surface-container": "#eceef0",
+                        "outline": "#737686",
+                        "surface-dim": "#d8dadc",
+                        "surface": "#f7f9fb",
+                        "on-surface-variant": "#434655",
+                        "tertiary-fixed-dim": "#ffb596",
+                        "secondary-container": "#dae2fd",
+                        "surface-container-low": "#f2f4f6",
+                        "on-secondary-fixed": "#131b2e",
+                        "on-tertiary-fixed-variant": "#7d2d00",
+                        "surface-tint": "#0053db",
+                        "inverse-on-surface": "#eff1f3",
+                        "on-secondary-container": "#5c647a",
+                        "secondary-fixed": "#dae2fd",
+                        "on-tertiary": "#ffffff",
+                        "tertiary-fixed": "#ffdbcd",
+                        "on-primary-container": "#eeefff",
+                        "surface-variant": "#e0e3e5",
+                        "on-primary-fixed": "#00174b",
+                        "error": "#ba1a1a",
+                        "on-primary-fixed-variant": "#003ea8",
+                        "on-tertiary-fixed": "#360f00"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "margin": "32px",
+                        "base": "4px",
+                        "container-max": "1440px",
+                        "stack-sm": "8px",
+                        "stack-md": "16px",
+                        "stack-lg": "32px",
+                        "gutter": "24px"
+                    },
+                    "fontFamily": {
+                        "headline-md": ["Manrope"],
+                        "display-lg": ["Manrope"],
+                        "body-lg": ["Inter"],
+                        "headline-lg-mobile": ["Manrope"],
+                        "label-bold": ["Inter"],
+                        "body-md": ["Inter"],
+                        "label-sm": ["Inter"],
+                        "headline-lg": ["Manrope"]
+                    },
+                    "fontSize": {
+                        "headline-md": ["24px", { "lineHeight": "1.3", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+                        "display-lg": ["48px", { "lineHeight": "1.1", "letterSpacing": "-0.03em", "fontWeight": "700" }],
+                        "body-lg": ["18px", { "lineHeight": "1.6", "letterSpacing": "-0.01em", "fontWeight": "400" }],
+                        "headline-lg-mobile": ["28px", { "lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+                        "label-bold": ["14px", { "lineHeight": "1.4", "letterSpacing": "0.01em", "fontWeight": "600" }],
+                        "body-md": ["16px", { "lineHeight": "1.5", "letterSpacing": "-0.01em", "fontWeight": "400" }],
+                        "label-sm": ["12px", { "lineHeight": "1.4", "letterSpacing": "0.02em", "fontWeight": "500" }],
+                        "headline-lg": ["32px", { "lineHeight": "1.2", "letterSpacing": "-0.02em", "fontWeight": "600" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .icon-fill {
+            font-variation-settings: 'FILL' 1;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background flex h-screen overflow-hidden antialiased">
+<!-- SideNavBar (From Shared Components JSON) -->
+<nav class="bg-surface fixed left-0 top-0 h-screen w-64 border-r border-outline-variant/30 flex flex-col p-stack-md z-40 shadow-md">
+<!-- Header -->
+<div class="flex items-center gap-stack-sm mb-stack-lg px-2">
+<div class="w-10 h-10 rounded bg-primary-container flex items-center justify-center text-on-primary-container">
+<span class="material-symbols-outlined icon-fill">local_hospital</span>
+</div>
+<div>
+<h1 class="text-headline-md font-headline-md font-extrabold text-primary tracking-tight">CheXNet</h1>
+<p class="text-label-sm font-label-sm text-on-surface-variant">Clinical Precision v2.1</p>
+</div>
+</div>
+<!-- CTA -->
+<button class="w-full bg-primary hover:bg-primary-container text-on-primary py-2 px-4 rounded-lg flex items-center justify-center gap-2 mb-stack-lg transition-colors font-label-bold text-label-bold shadow-sm">
+<span class="material-symbols-outlined text-[20px]">add</span>
+            New Analysis
+        </button>
+<!-- Main Navigation -->
+<div class="flex-1 space-y-1">
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">monitor_heart</span>
+<span class="text-label-bold font-label-bold">Diagnostic Hub</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 bg-primary/10 text-primary font-bold rounded-lg transition-all duration-200 translate-x-1 duration-150" href="#">
+<span class="material-symbols-outlined icon-fill">history</span>
+<span class="text-label-bold font-label-bold">Patient History</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">science</span>
+<span class="text-label-bold font-label-bold">Research Portal</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">inventory_2</span>
+<span class="text-label-bold font-label-bold">System Archive</span>
+</a>
+</div>
+<!-- Footer Navigation -->
+<div class="pt-stack-md border-t border-outline-variant/30 space-y-1 mt-auto">
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">help_outline</span>
+<span class="text-label-bold font-label-bold">Support</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 text-on-secondary-container hover:bg-surface-container-high hover:bg-surface-container-highest transition-all duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined">description</span>
+<span class="text-label-bold font-label-bold">Documentation</span>
+</a>
+</div>
+</nav>
+<!-- Main Content Area -->
+<main class="flex-1 ml-64 flex flex-col h-screen overflow-hidden">
+<!-- Header Section -->
+<header class="px-margin py-stack-lg flex justify-between items-end border-b border-outline-variant/20 bg-surface-container-lowest/50 backdrop-blur-sm sticky top-0 z-30">
+<div>
+<h2 class="text-headline-lg font-headline-lg text-on-surface tracking-tight">Lịch sử Phân tích X-quang Ngực</h2>
+<p class="text-body-md font-body-md text-on-surface-variant mt-1">Quản lý và tra cứu hồ sơ phân tích chẩn đoán hình ảnh phổi chuyên sâu.</p>
+</div>
+<div class="flex gap-3">
+<button class="px-4 py-2 border border-outline bg-surface-container-lowest text-on-surface rounded-lg text-label-bold font-label-bold flex items-center gap-2 hover:bg-surface-container-low transition-colors shadow-sm">
+<span class="material-symbols-outlined text-[18px]">download</span>
+                    Xuất CSV
+                </button>
+</div>
+</header>
+<!-- Content Scrollable Area -->
+<div class="p-margin overflow-y-auto flex-1">
+<!-- Robust Filter Bar -->
+<div class="bg-surface-container-lowest border border-outline-variant/30 rounded-xl p-stack-sm mb-stack-md flex items-center gap-stack-md shadow-sm">
+<!-- Search -->
+<div class="flex-1 relative">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
+<input class="w-full pl-10 pr-3 py-2 bg-surface-container-low border-transparent focus:border-primary focus:ring-1 focus:ring-primary rounded-lg text-body-md font-body-md text-on-surface placeholder:text-outline transition-all" placeholder="Tìm kiếm theo Tên, ID hoặc BS điều trị..." type="text"/>
+</div>
+<div class="w-px h-8 bg-outline-variant/30 hidden md:block"></div>
+<!-- Filters -->
+<div class="flex gap-stack-sm">
+<div class="relative group">
+<select class="appearance-none bg-surface-container-lowest border border-outline-variant/50 text-on-surface text-label-bold font-label-bold rounded-lg pl-3 pr-9 py-2 focus:border-primary focus:ring-1 focus:ring-primary outline-none cursor-pointer hover:bg-surface-container-low/50 transition-colors">
+<option>30 ngày qua</option>
+<option>7 ngày qua</option>
+<option>Năm nay</option>
+<option>Tùy chỉnh...</option>
+</select>
+<span class="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-outline pointer-events-none group-hover:text-on-surface transition-colors">calendar_today</span>
+</div>
+<div class="relative group">
+<select class="appearance-none bg-surface-container-lowest border border-outline-variant/50 text-on-surface text-label-bold font-label-bold rounded-lg pl-3 pr-9 py-2 focus:border-primary focus:ring-1 focus:ring-primary outline-none cursor-pointer hover:bg-surface-container-low/50 transition-colors">
+<option>Tất cả Kết quả</option>
+<option>Tràn dịch màng phổi</option>
+<option>Nốt mờ / Khối u</option>
+<option>Viêm phổi</option>
+<option>Bình thường</option>
+</select>
+<span class="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-outline pointer-events-none group-hover:text-on-surface transition-colors">filter_list</span>
+</div>
+<div class="relative group">
+<select class="appearance-none bg-surface-container-lowest border border-outline-variant/50 text-on-surface text-label-bold font-label-bold rounded-lg pl-3 pr-9 py-2 focus:border-primary focus:ring-1 focus:ring-primary outline-none cursor-pointer hover:bg-surface-container-low/50 transition-colors">
+<option>Mọi Mức rủi ro</option>
+<option>Nghiêm trọng</option>
+<option>Trung bình</option>
+<option>Thấp</option>
+</select>
+<span class="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-outline pointer-events-none group-hover:text-on-surface transition-colors">warning</span>
+</div>
+</div>
+</div>
+<!-- High Density Table Container -->
+<div class="bg-surface-container-lowest border border-outline-variant/30 rounded-xl shadow-sm overflow-hidden">
+<table class="w-full text-left border-collapse">
+<thead class="bg-surface-container-low border-b border-outline-variant/30">
+<tr>
+<th class="py-2 px-4 w-12 text-center"><input class="rounded border-outline-variant text-primary focus:ring-primary" type="checkbox"/></th>
+<th class="py-3 px-4 text-label-sm font-label-sm text-on-surface-variant font-medium uppercase tracking-wider">Hình ảnh</th>
+<th class="py-3 px-4 text-label-sm font-label-sm text-on-surface-variant font-medium uppercase tracking-wider">Bệnh nhân / ID</th>
+<th class="py-3 px-4 text-label-sm font-label-sm text-on-surface-variant font-medium uppercase tracking-wider">Ngày chụp</th>
+<th class="py-3 px-4 text-label-sm font-label-sm text-on-surface-variant font-medium uppercase tracking-wider">Loại Scan</th>
+<th class="py-3 px-4 text-label-sm font-label-sm text-on-surface-variant font-medium uppercase tracking-wider">AI Dự đoán</th>
+<th class="py-3 px-4 text-label-sm font-label-sm text-on-surface-variant font-medium uppercase tracking-wider">Trạng thái</th>
+<th class="py-3 px-4 text-label-sm font-label-sm text-on-surface-variant font-medium uppercase tracking-wider text-right">Thao tác</th>
+</tr>
+</thead>
+<tbody class="text-body-md font-body-md divide-y divide-outline-variant/20">
+<!-- Row 1 -->
+<tr class="hover:bg-surface-container-low/50 transition-colors group">
+<td class="py-2 px-4 text-center"><input class="rounded border-outline-variant text-primary focus:ring-primary opacity-0 group-hover:opacity-100 transition-opacity" type="checkbox"/></td>
+<td class="py-2 px-4">
+<div class="w-12 h-12 bg-surface-variant rounded border border-outline-variant/30 overflow-hidden relative">
+<img class="w-full h-full object-cover opacity-80" data-alt="A close-up view of a high-contrast digital medical chest X-ray displaying pulmonary structures. The image is monochromatic with stark whites and deep blacks, suitable for diagnostic analysis in a modern clinical interface. The mood is analytical and sterile." src="https://lh3.googleusercontent.com/aida-public/AB6AXuB7LRkvHtnC72n-cnQkL1fqfZhi_g24gfei2gp9olpU36Z6OQVYQ5D9ouLaJ2GzyGkLMdUsCPgWUgAJZGOSXX_xXd-NvYRkMPodkgMyKb7Eyl5zfDJG6bzIvJJbvoJB5_BfvLMflEwRC0pFFnkwHW4qVyWSdOw4Ps6mHqL5xtgPRFCdE1KiaXYT3LHPeWbG6pKepQ0pFv2l1SogXvRjNItQTCURiEggIdp6ThFQ01GzxfzfFbUDyOfFH-a4Ngev82stu5Rk68y268LZ"/>
+</div>
+</td>
+<td class="py-2 px-4">
+<div class="flex flex-col">
+<span class="text-label-bold font-label-bold text-on-surface">Nguyễn Văn An</span>
+<span class="text-label-sm font-label-sm text-on-surface-variant font-mono mt-0.5">PT-88291A</span>
+</div>
+</td>
+<td class="py-2 px-4 text-on-surface-variant">12/10/2023 <span class="text-outline text-label-sm block">08:45 AM</span></td>
+<td class="py-2 px-4"><span class="text-on-surface font-medium">X-Quang Ngực (PA)</span></td>
+<td class="py-2 px-4">
+<span class="text-error font-medium flex items-center gap-1">
+<span class="material-symbols-outlined text-[16px]">priority_high</span> Nốt mờ phổi phải
+                                </span>
+</td>
+<td class="py-2 px-4">
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-label-sm font-label-sm bg-error-container text-on-error-container border border-error-container/50">
+<span class="w-1.5 h-1.5 rounded-full bg-error mr-1.5"></span>
+                                    Đánh dấu
+                                </span>
+</td>
+<td class="py-2 px-4 text-right">
+<button class="p-1.5 text-on-surface-variant hover:text-primary hover:bg-primary-container/10 rounded transition-colors" title="Xem chi tiết">
+<span class="material-symbols-outlined text-[20px]">visibility</span>
+</button>
+</td>
+</tr>
+<!-- Row 2 -->
+<tr class="bg-surface-container-low/20 hover:bg-surface-container-low/50 transition-colors group">
+<td class="py-2 px-4 text-center"><input class="rounded border-outline-variant text-primary focus:ring-primary opacity-0 group-hover:opacity-100 transition-opacity" type="checkbox"/></td>
+<td class="py-2 px-4">
+<div class="w-12 h-12 bg-surface-variant rounded border border-outline-variant/30 overflow-hidden relative">
+<img class="w-full h-full object-cover opacity-80" data-alt="A generic medical radiograph showing abstract bone structures against a dark background. The lighting is diffused and even, emphasizing texture and density variations typical in diagnostic imaging. Clean and professional appearance." src="https://lh3.googleusercontent.com/aida-public/AB6AXuB3dsR2GfWgz9rjv_3QhE1ItgMST5ROA0cQ9UMguhiCEhN8rPv-ZT_clcG6zyIMgahV3WBOOw9wf0y21HpEkVBLdgIktDFEhFICiZcWkckAOe1WKFeUL5_GlUgJD-GQY24P7TgC5nt9ZHg2FpMxuvI8suTsUczPHTjjx_UGZbr_Sw_zwVV0TLMZz35NyZl0wggKi7Wu5LVFiuBISFFtvakWOjjm-7jSoxPjp1l6hpnwOewbK__Q9CPt3UNIzgsENd3izHbiT-yp7dlR"/>
+</div>
+</td>
+<td class="py-2 px-4">
+<div class="flex flex-col">
+<span class="text-label-bold font-label-bold text-on-surface">Trần Thị Bích</span>
+<span class="text-label-sm font-label-sm text-on-surface-variant font-mono mt-0.5">PT-77302B</span>
+</div>
+</td>
+<td class="py-2 px-4 text-on-surface-variant">11/10/2023 <span class="text-outline text-label-sm block">14:20 PM</span></td>
+<td class="py-2 px-4"><span class="text-on-surface font-medium">X-Quang Ngực (AP)</span></td>
+<td class="py-2 px-4 text-on-surface-variant">Không phát hiện bất thường</td>
+<td class="py-2 px-4">
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-label-sm font-label-sm bg-secondary-container text-on-secondary-container border border-secondary-container/50">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary mr-1.5"></span>
+                                    Đã xác minh
+                                </span>
+</td>
+<td class="py-2 px-4 text-right">
+<button class="p-1.5 text-on-surface-variant hover:text-primary hover:bg-primary-container/10 rounded transition-colors" title="Xem chi tiết">
+<span class="material-symbols-outlined text-[20px]">visibility</span>
+</button>
+</td>
+</tr>
+<!-- Row 3 -->
+<tr class="hover:bg-surface-container-low/50 transition-colors group">
+<td class="py-2 px-4 text-center"><input class="rounded border-outline-variant text-primary focus:ring-primary opacity-0 group-hover:opacity-100 transition-opacity" type="checkbox"/></td>
+<td class="py-2 px-4">
+<div class="w-12 h-12 bg-surface-variant rounded border border-outline-variant/30 flex items-center justify-center text-outline">
+<span class="material-symbols-outlined">image</span>
+</div>
+</td>
+<td class="py-2 px-4">
+<div class="flex flex-col">
+<span class="text-label-bold font-label-bold text-on-surface">Lê Hoàng Nam</span>
+<span class="text-label-sm font-label-sm text-on-surface-variant font-mono mt-0.5">PT-99104C</span>
+</div>
+</td>
+<td class="py-2 px-4 text-on-surface-variant">11/10/2023 <span class="text-outline text-label-sm block">09:15 AM</span></td>
+<td class="py-2 px-4"><span class="text-on-surface font-medium">X-Quang Ngực (Lateral)</span></td>
+<td class="py-2 px-4 text-outline italic">Đang phân tích...</td>
+<td class="py-2 px-4">
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-label-sm font-label-sm bg-surface-variant text-on-surface-variant border border-outline-variant/50">
+<span class="material-symbols-outlined text-[14px] mr-1 animate-spin">sync</span>
+                                    Đang chờ
+                                </span>
+</td>
+<td class="py-2 px-4 text-right">
+<button class="p-1.5 text-outline cursor-not-allowed rounded" disabled="" title="Đang xử lý">
+<span class="material-symbols-outlined text-[20px]">visibility</span>
+</button>
+</td>
+</tr>
+<!-- Row 4 -->
+<tr class="bg-surface-container-low/20 hover:bg-surface-container-low/50 transition-colors group">
+<td class="py-2 px-4 text-center"><input class="rounded border-outline-variant text-primary focus:ring-primary opacity-0 group-hover:opacity-100 transition-opacity" type="checkbox"/></td>
+<td class="py-2 px-4">
+<div class="w-12 h-12 bg-surface-variant rounded border border-outline-variant/30 overflow-hidden relative">
+<img class="w-full h-full object-cover opacity-80" data-alt="A digital display showing a segmented 3D reconstruction of a human torso from an MRI scan. The colors are artificially mapped in cool blues and greens on a dark slate background, characteristic of advanced clinical analysis software." src="https://lh3.googleusercontent.com/aida-public/AB6AXuC3c6fXrE8SimQ0zfP3tNqlrYU033eOkceYj-bk2SWLiKfYKlnbUun96JLtmFjSNqfQb9qPIt2k9i53t-i6lISMU3uSjdyv8QpzHlMQlFRvzk7AJ7vYrDqBMguYCDqbeGBRlxZex3DXPMpus69d1-p96FF_gKode226GnygRRRCQX9_NmgyocQFdYNmDjdG32rSqTc4G8kftYv2KWrenhonas5ZElS3IFQ5Z-dUq44gdurWEmhw9eby0bYmnV65T_rnfcZXD2DMTFyM"/>
+</div>
+</td>
+<td class="py-2 px-4">
+<div class="flex flex-col">
+<span class="text-label-bold font-label-bold text-on-surface">Phạm Thị Mai</span>
+<span class="text-label-sm font-label-sm text-on-surface-variant font-mono mt-0.5">PT-66421D</span>
+</div>
+</td>
+<td class="py-2 px-4 text-on-surface-variant">10/10/2023 <span class="text-outline text-label-sm block">16:30 PM</span></td>
+<td class="py-2 px-4"><span class="text-on-surface font-medium">X-Quang Ngực (PA)</span></td>
+<td class="py-2 px-4 text-on-surface-variant">Dày thành phế quản nhẹ</td>
+<td class="py-2 px-4">
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-label-sm font-label-sm bg-secondary-container text-on-secondary-container border border-secondary-container/50">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary mr-1.5"></span>
+                                    Đã xác minh
+                                </span>
+</td>
+<td class="py-2 px-4 text-right">
+<button class="p-1.5 text-on-surface-variant hover:text-primary hover:bg-primary-container/10 rounded transition-colors" title="Xem chi tiết">
+<span class="material-symbols-outlined text-[20px]">visibility</span>
+</button>
+</td>
+</tr>
+</tbody>
+</table>
+<!-- Pagination -->
+<div class="border-t border-outline-variant/30 px-4 py-3 flex items-center justify-between bg-surface-container-lowest text-label-sm font-label-sm text-on-surface-variant">
+<div>Đang hiển thị <span class="font-bold text-on-surface">1</span> đến <span class="font-bold text-on-surface">4</span> trong số <span class="font-bold text-on-surface">128</span> hồ sơ</div>
+<div class="flex gap-1">
+<button class="p-1 border border-outline-variant/50 rounded hover:bg-surface-container-low disabled:opacity-50" disabled="">
+<span class="material-symbols-outlined text-[18px]">chevron_left</span>
+</button>
+<button class="w-7 h-7 flex items-center justify-center rounded bg-primary text-on-primary font-bold">1</button>
+<button class="w-7 h-7 flex items-center justify-center rounded hover:bg-surface-container-low border border-transparent">2</button>
+<button class="w-7 h-7 flex items-center justify-center rounded hover:bg-surface-container-low border border-transparent">3</button>
+<span class="w-7 h-7 flex items-center justify-center">...</span>
+<button class="p-1 border border-outline-variant/50 rounded hover:bg-surface-container-low">
+<span class="material-symbols-outlined text-[18px]">chevron_right</span>
+</button>
+</div>
+</div>
+</div>
+</div>
+</main>
+</body></html>
