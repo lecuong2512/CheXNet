@@ -1,22 +1,22 @@
 version: '3.8'
 
 services:
-  # ── MongoDB Database ────────────────────────────────────────────────────────
-  mongodb:
-    image: mongo:7.0
-    container_name: chexnet-mongodb
-    restart: always
-    ports:
-      - '27017:27017'
-    volumes:
-      - mongodb_data:/data/db
-    networks:
-      - chexnet_network
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  # # ── MongoDB Database ────────────────────────────────────────────────────────
+  # mongodb:
+  #   image: mongo:7.0
+  #   container_name: chexnet-mongodb
+  #   restart: always
+  #   ports:
+  #     - '27017:27017'
+  #   volumes:
+  #     - mongodb_data:/data/db
+  #   networks:
+  #     - chexnet_network
+  #   healthcheck:
+  #     test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
 
   # ── Redis Cache & PubSub ───────────────────────────────────────────────────
   redis:
@@ -48,9 +48,6 @@ services:
       # Map thư mục Models và Trainedmodel từ ngoài workspace vào container
       - ../Models:/Models:ro
       - ../Trainedmodel:/Trainedmodel:ro
-    environment:
-      - XRAY_AI_VALIDATE=true
-      - XRAY_VALIDATE_STRICT=true
     networks:
       - chexnet_network
     healthcheck:
@@ -81,7 +78,7 @@ services:
     environment:
       - PORT=3000
       - NODE_ENV=production
-      - MONGODB_URI=mongodb://mongodb:27017/chexnet_v3?retryWrites=false
+      - MONGODB_URI=mongodb://mongodb:27017/chexnet_v3
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=""
