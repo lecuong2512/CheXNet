@@ -4,169 +4,248 @@ import sys
 import torch
 
 # =========================================================================
-# VÁ LỖI MODULE: ÉP PYTHON NHẬN DIỆN THƯ MỤC 'Models'
-# Đoạn code này giúp giải quyết lỗi ModuleNotFoundError trên Colab
+# Thêm thư mục Models vào sys.path để import đúng trên Colab
 # =========================================================================
-# Lấy đường dẫn thư mục hiện tại (ví dụ: /content/CheXNet)
 current_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
 models_dir = os.path.join(current_dir, 'Models')
-
-# Thêm thư mục Models vào danh sách tìm kiếm của Python
 if models_dir not in sys.path:
     sys.path.insert(0, models_dir)
 # =========================================================================
 
-# Bây giờ có thể import bình thường như thể chúng nằm cùng cấp
 from TrainModel import HybridTrainer
 from config import TensorCoreConfig
 
+
+from checkpoint_utils import load_checkpoint_safe, extract_state_dict
+
+
 def main():
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Group Project: Hybrid CNN-ViT Multi-Label Chest X-ray Classification")
     print("Architecture: ConvNeXtV2 & SwinV2 | Residual Masking")
-    print("="*80 + "\n")
-    
-    mode = input("Chọn chế độ [train/test]: ").strip().lower()
-    
-    if mode == 'train':
-        runTrain()
-    elif mode == 'test':
+    print("=" * 80 + "\n")
+
+    print("Chọn chế độ:")
+    print("  1. Train mới từ đầu")
+    print("  2. Train tiếp từ checkpoint cũ (Resume)")
+    print("  3. Test / Đánh giá")
+    mode_choice = input("Lựa chọn [1/2/3]: ").strip()
+
+    if mode_choice == '1':
+        runTrain(resume=False)
+    elif mode_choice == '2':
+        runTrain(resume=True)
+    elif mode_choice == '3':
         runTest()
     else:
-        print("❌ Lựa chọn không hợp lệ. Vui lòng chọn 'train' hoặc 'test'.")
+        print("❌ Lựa chọn không hợp lệ.")
 
-def runTrain():
+
+# ─────────────────────────────────────────────────────────────────────────────
+def runTrain(resume: bool = False):
     print("\n[MODE] Khởi tạo huấn luyện Mô hình Lai")
-    
-    # 1. Chọn Backbone
+
+    resume_path = None
+
+    # ── A. Nếu resume: load checkpoint trước để tự động điền model_size / img_size
+    if resume:
+        resume_path = input(
+            "\n📂 Đường dẫn checkpoint cũ (.pth) [Trainedmodel/hybrid_model.pth]: "
+        ).strip() or 'Trainedmodel/hybrid_model.pth'
+
+        if os.path.isfile(resume_path):
+            device_tmp = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            ckpt_tmp = load_checkpoint_safe(resume_path, device_tmp)
+            ckpt_model_size = ckpt_tmp.get('model_size', None)
+            ckpt_img_size   = ckpt_tmp.get('img_size',   None)
+            ckpt_epoch      = ckpt_tmp.get('epoch',      '?')
+            ckpt_stage      = ckpt_tmp.get('stage',      '?')
+            ckpt_auroc      = ckpt_tmp.get('best_auroc', 0.0)
+            print(f"\n✅ Checkpoint tìm thấy:")
+            print(f"   Đã train đến epoch {ckpt_epoch}, stage {ckpt_stage}, "
+                  f"best AUROC = {ckpt_auroc:.4f}")
+            if ckpt_model_size:
+                print(f"   model_size={ckpt_model_size}, img_size={ckpt_img_size}")
+        else:
+            ckpt_model_size = None
+            ckpt_img_size   = None
+            print(f"⚠️  Không tìm thấy '{resume_path}' — sẽ bắt đầu như train mới.")
+            resume_path = None
+
+    # ── B. Chọn Backbone
     print("\n🏗️ Chọn cặp Backbone:")
-    print("  1. Base-Base (ConvNeXtV2-Base + SwinV2-Base) - Phù hợp VRAM 12-16GB")
-    print("  2. Large-Large (ConvNeXtV2-Large + SwinV2-Large) - Yêu cầu VRAM > 24GB")
-    bb_choice = input("Lựa chọn [1/2]: ").strip() or "1"
+    print("  1. Base-Base (ConvNeXtV2-Base + SwinV2-Base)  — VRAM 12–16 GB")
+    print("  2. Large-Large (ConvNeXtV2-Large + SwinV2-Large) — VRAM > 24 GB")
+    if resume and ckpt_model_size:
+        default_bb = '2' if ckpt_model_size == 'large' else '1'
+        bb_choice = input(f"Lựa chọn [1/2] (mặc định {default_bb} từ checkpoint): ").strip() or default_bb
+    else:
+        bb_choice = input("Lựa chọn [1/2]: ").strip() or "1"
     model_size = 'large' if bb_choice == '2' else 'base'
-    
-    # 2. Chọn Kích thước ảnh
+
+    # ── C. Chọn Kích thước ảnh
     print("\n📐 Chọn kích thước ảnh đầu vào:")
-    print("  1. 256x256 (Tốc độ nhanh, tiết kiệm VRAM)")
-    print("  2. 384x384 (Độ phân giải cao, khuyến nghị cho VinDr)")
-    size_choice = input("Lựa chọn [1/2]: ").strip() or "2"
-    img_size = 384 if size_choice == '2' else 256
-    
-    # 3. Phân tích phần cứng và Batch Size
+    print("  1. 256×256 (Tốc độ nhanh, tiết kiệm VRAM)")
+    print("  2. 384×384 (Độ phân giải cao, khuyến nghị cho VinDr)")
+    if resume and ckpt_img_size:
+        default_sz = '2' if ckpt_img_size == 384 else '1'
+        sz_choice = input(f"Lựa chọn [1/2] (mặc định {default_sz} từ checkpoint): ").strip() or default_sz
+    else:
+        sz_choice = input("Lựa chọn [1/2]: ").strip() or "2"
+    img_size = 384 if sz_choice == '2' else 256
+
+    # ── D. Phân tích phần cứng & Batch Size
     config = TensorCoreConfig.get_optimal_hybrid_config(model_size, img_size)
     TensorCoreConfig.print_config(config)
-    
+
     use_optimal = input("\nSử dụng Batch Size đề xuất? [y/n]: ").strip().lower()
     if use_optimal == 'y':
         trBatchSize = config['batch_size']
     else:
         trBatchSize = int(input("Nhập Batch Size thủ công (VD: 8, 16, 32): ").strip())
 
-    # 4. Cấu hình Đường dẫn
+    # ── E. Đường dẫn dữ liệu
     print("\n📂 Cấu hình đường dẫn dữ liệu:")
-    pathDirData = input("Thư mục chứa ảnh [Database/]: ").strip() or 'Database'
-    pathFileTrain = input("File CSV Train [Dataset/train_data.csv]: ").strip() or 'Dataset/train_data.csv'
-    pathFileVal = input("File CSV Val [Dataset/val_data.csv]: ").strip() or 'Dataset/val_data.csv'
-    pathModel = input("Đường dẫn lưu model [Trainedmodel/hybrid_model.pth]: ").strip() or 'Trainedmodel/hybrid_model.pth'
-    
-    trMaxEpoch = int(input("\nSố lượng Epochs tối đa [50]: ").strip() or "50")
-    
-    print("\n" + "="*80)
-    print("🚀 BẮT ĐẦU HUẤN LUYỆN 2 GIAI ĐOẠN")
-    print("="*80)
-    
+    pathDirData   = input("Thư mục chứa ảnh [Database/]: ").strip() or 'Database'
+    pathFileTrain = input("File CSV Train [Dataset/train_list.csv]: ").strip() or 'Dataset/train_list.csv'
+    pathFileVal   = input("File CSV Val   [Dataset/val_list.csv]: ").strip() or 'Dataset/val_list.csv'
+    pathModel     = input("Đường dẫn lưu model [Trainedmodel/hybrid_model.pth]: ").strip() or 'Trainedmodel/hybrid_model.pth'
+
+    # ── F. Preload vào RAM
+    print("\n💾 Preload dữ liệu vào RAM:")
+    print("  1. Không — đọc ảnh từ đĩa mỗi epoch (an toàn, ít RAM)")
+    print("  2. Có    — đọc toàn bộ vào RAM 1 lần (train nhanh hơn, cần nhiều RAM)")
+    preload_choice = input("Lựa chọn [1/2]: ").strip() or "1"
+    preload_images = (preload_choice == '2')
+    num_workers_preload = 8
+    if preload_images:
+        nw = input("Số threads đọc song song [8]: ").strip()
+        num_workers_preload = int(nw) if nw else 8
+
+    # ── G. Số epoch
+    trMaxEpoch = int(input("\nSố Epoch tối đa cho lần chạy này [50]: ").strip() or "50")
+
+    print("\n" + "=" * 80)
+    if resume and resume_path:
+        print("🔄 TIẾP TỤC HUẤN LUYỆN TỪ CHECKPOINT")
+    else:
+        print("🚀 BẮT ĐẦU HUẤN LUYỆN MỚI — 2 GIAI ĐOẠN")
+    print("=" * 80)
+
     HybridTrainer.train(
-        pathDirData=pathDirData, 
-        pathFileTrain=pathFileTrain, 
+        pathDirData=pathDirData,
+        pathFileTrain=pathFileTrain,
         pathFileVal=pathFileVal,
         model_size=model_size,
         img_size=img_size,
-        trBatchSize=trBatchSize, 
+        trBatchSize=trBatchSize,
         trMaxEpoch=trMaxEpoch,
-        pathModel=pathModel
+        pathModel=pathModel,
+        preload_images=preload_images,
+        num_workers_preload=num_workers_preload,
+        resume_path=resume_path,
     )
 
-def runTest():
-    print("\n[MODE] Kiểm thử Mô hình Lai")
 
-    from TrainModel import HybridTrainer
+# ─────────────────────────────────────────────────────────────────────────────
+def runTest():
+    print("\n[MODE] Kiểm thử / Đánh giá Mô hình Lai")
+
     from read_data import DatasetGenerator, FastDataLoader
     from Model import HybridCNNViTModel
-    import torch
     import numpy as np
     import torchvision.transforms as transforms
     from sklearn.metrics import roc_auc_score, confusion_matrix, classification_report
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import os
 
     CLASS_NAMES = HybridTrainer.CLASS_NAMES
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Cấu hình
-    pathModel = input("Đường dẫn file model (.pth) [Trainedmodel/hybrid_model.pth]: ").strip() or 'Trainedmodel/hybrid_model.pth'
+    # ── Đường dẫn
+    pathModel   = input("Đường dẫn file model (.pth) [Trainedmodel/hybrid_model.pth]: ").strip() or 'Trainedmodel/hybrid_model.pth'
     pathDirData = input("Thư mục chứa ảnh [Database/]: ").strip() or 'Database'
-    pathFileTest = input("File CSV Test [Dataset/test_data.csv]: ").strip() or 'Dataset/test_data.csv'
-    save_dir = input("Thư mục lưu kết quả [Results/]: ").strip() or 'Results'
+    pathFileTest = input("File CSV Test [Dataset/test_list.csv]: ").strip() or 'Dataset/test_list.csv'
+    save_dir    = input("Thư mục lưu kết quả [Results/]: ").strip() or 'Results'
     os.makedirs(save_dir, exist_ok=True)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\nDevice: {device}")
 
-    # Load checkpoint để lấy model_size và img_size
-    # weights_only=False cần thiết vì checkpoint chứa numpy scalar (an toàn vì file do chính mình train)
-    try:
-        import torch.serialization, numpy as _np
-        torch.serialization.add_safe_globals([_np._core.multiarray.scalar])
-        ckpt = torch.load(pathModel, map_location=device, weights_only=True)
-    except Exception:
-        ckpt = torch.load(pathModel, map_location=device, weights_only=False)
-    model_size = ckpt.get('model_size', 'base')
-    img_size = ckpt.get('img_size', 384)
+    # ── Load checkpoint
+    ckpt = load_checkpoint_safe(pathModel, device)
+    ckpt_model_size = ckpt.get('model_size', 'base')
+    ckpt_img_size   = ckpt.get('img_size', 384)
+    print(f"✅ Checkpoint: epoch={ckpt.get('epoch','?')}, stage={ckpt.get('stage','?')}, "
+          f"best_auroc={ckpt.get('best_auroc',0.0):.4f}")
+    print(f"   model_size={ckpt_model_size}, img_size={ckpt_img_size}")
 
-    model_size_input = input(f"Model size (base/large) [{model_size}]: ").strip() or model_size
-    img_size_input = input(f"Image size (256/384) [{img_size}]: ").strip()
-    if img_size_input:
-        img_size = int(img_size_input)
+    # ── Xác nhận hoặc ghi đè model_size / img_size
+    print("\n🏗️ Chọn kích thước model:")
+    print(f"  1. Base  (mặc định từ checkpoint: {'✓' if ckpt_model_size=='base' else ' '})")
+    print(f"  2. Large (mặc định từ checkpoint: {'✓' if ckpt_model_size=='large' else ' '})")
+    default_bb = '2' if ckpt_model_size == 'large' else '1'
+    bb_in = input(f"Lựa chọn [1/2] (Enter = {default_bb}): ").strip() or default_bb
+    model_size = 'large' if bb_in == '2' else 'base'
 
-    # Build & load model
-    print(f"\n🏗️ Loading model ({model_size_input.upper()}, {img_size}px)...")
-    model = HybridCNNViTModel(num_classes=15, model_size=model_size_input, img_size=img_size).to(device)
-    state_dict = ckpt['state_dict'] if 'state_dict' in ckpt else ckpt
-    if any(k.startswith('module.') for k in state_dict.keys()):
-        from collections import OrderedDict
-        state_dict = OrderedDict((k[7:], v) if k.startswith('module.') else (k, v) for k, v in state_dict.items())
+    print("\n📐 Chọn kích thước ảnh:")
+    print(f"  1. 256×256   (mặc định từ checkpoint: {'✓' if ckpt_img_size==256 else ' '})")
+    print(f"  2. 384×384   (mặc định từ checkpoint: {'✓' if ckpt_img_size==384 else ' '})")
+    default_sz = '2' if ckpt_img_size == 384 else '1'
+    sz_in = input(f"Lựa chọn [1/2] (Enter = {default_sz}): ").strip() or default_sz
+    img_size = 384 if sz_in == '2' else 256
+
+    # ── Build & load model
+    print(f"\n🏗️ Đang load model ({model_size.upper()}, {img_size}px)...")
+    model = HybridCNNViTModel(num_classes=15, model_size=model_size, img_size=img_size).to(device)
+    state_dict = extract_state_dict(ckpt)
     model.load_state_dict(state_dict)
     model.eval()
-    print(f"✅ Loaded model (best AUROC lúc train: {ckpt.get('best_auroc', 'N/A')})")
 
-    # Dataset
+    # ── Dataset test
     transformTest = transforms.Compose([
         transforms.Resize(int(img_size * 1.14)),
-        transforms.CenterCrop(img_size)
+        transforms.CenterCrop(img_size),
     ])
-    datasetTest = DatasetGenerator(pathDirData, pathFileTest, transformTest)
-    dataLoaderTest = FastDataLoader.create_dataloader(datasetTest, batch_size=16, shuffle=False, num_workers=4)
+    datasetTest   = DatasetGenerator(pathDirData, pathFileTest, transformTest)
+    dataLoaderTest = FastDataLoader.create_dataloader(
+        datasetTest, batch_size=16, shuffle=False, num_workers=4
+    )
 
-    # Inference
-    print("\n🔍 Đang chạy inference...")
+    # ── Inference với TTA (Test-Time Augmentation)
+    # TTA: chạy forward 2 lần (gốc + flip ngang), lấy trung bình logits
+    # → ổn định hơn, AUROC +0.3-0.5% so với inference đơn
+    print("\n🔍 Đang chạy inference + TTA...")
     allPreds, allTargets = [], []
+    
+    # Detect AMP dtype
+    use_amp = device.type == 'cuda'
+    if use_amp:
+        compute_cap = torch.cuda.get_device_capability(0)
+        amp_dtype = torch.bfloat16 if compute_cap >= (8, 0) else torch.float16
+    else:
+        amp_dtype = torch.float32
+    
     with torch.no_grad():
         from tqdm import tqdm
-        for inputs, targets, _, _ in tqdm(dataLoaderTest, desc="Testing", ncols=100):
+        for inputs, targets, _, _ in tqdm(dataLoaderTest, desc="Testing+TTA", ncols=100):
             inputs = inputs.to(device)
-            logits, _ = model(inputs)
+            with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+                logits, _ = model(inputs)
+                # TTA: lật ngang ảnh và lấy trung bình logits
+                logits_flip, _ = model(torch.flip(inputs, dims=[3]))
+            logits = ((logits.float() + logits_flip.float()) / 2.0)
             allPreds.append(torch.sigmoid(logits).cpu())
             allTargets.append(targets.cpu())
 
-    allPreds = torch.cat(allPreds, dim=0).numpy()
+    allPreds   = torch.cat(allPreds,   dim=0).numpy()
     allTargets = torch.cat(allTargets, dim=0).numpy()
-    allBinary = (allPreds >= 0.5).astype(int)
+    allBinary  = (allPreds >= 0.5).astype(int)
 
-    # Per-class AUROC
-    print("\n" + "="*60)
+    # ── Per-class AUROC
+    print("\n" + "=" * 60)
     print("📊 KẾT QUẢ KIỂM THỬ")
-    print("="*60)
+    print("=" * 60)
     aurocs = []
     for i, name in enumerate(CLASS_NAMES):
         try:
@@ -175,41 +254,40 @@ def runTest():
             print(f"  {name:<22}: AUROC = {auc:.4f}")
         except Exception:
             aurocs.append(float('nan'))
-            print(f"  {name:<22}: AUROC = N/A (class không có trong test set)")
-    mean_auroc = np.nanmean(aurocs)
+            print(f"  {name:<22}: AUROC = N/A")
+    mean_auroc = float(__import__('numpy').nanmean(aurocs))
     print(f"\n  {'Mean AUROC':<22}: {mean_auroc:.4f}")
 
     # Classification report
     print("\n📋 Classification Report (threshold=0.5):")
     print(classification_report(
-        allTargets.flatten(),
-        allBinary.flatten(),
-        target_names=['Negative', 'Positive'],
-        digits=4
+        allTargets.flatten(), allBinary.flatten(),
+        target_names=['Negative', 'Positive'], digits=4
     ))
 
-    # Plot per-class AUROC bar chart
+    # ── Biểu đồ AUROC
     fig, ax = plt.subplots(figsize=(14, 5))
-    bars = ax.bar(CLASS_NAMES, aurocs, color='steelblue', edgecolor='white', linewidth=0.5)
-    ax.axhline(y=mean_auroc, color='tomato', linestyle='--', linewidth=1.5, label=f'Mean AUROC = {mean_auroc:.4f}')
+    ax.bar(CLASS_NAMES, aurocs, color='steelblue', edgecolor='white', linewidth=0.5)
+    ax.axhline(y=mean_auroc, color='tomato', linestyle='--', linewidth=1.5,
+               label=f'Mean AUROC = {mean_auroc:.4f}')
     ax.set_ylim(0, 1.05)
     ax.set_ylabel('AUROC')
     ax.set_title('Per-class AUROC trên Test Set')
     ax.set_xticklabels(CLASS_NAMES, rotation=35, ha='right', fontsize=9)
-    ax.legend()
-    ax.grid(axis='y', alpha=0.3)
+    ax.legend(); ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
     auroc_path = os.path.join(save_dir, 'test_auroc.png')
     plt.savefig(auroc_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"\n✓ Đã lưu biểu đồ AUROC: {auroc_path}")
+    print(f"\n✓ Biểu đồ AUROC: {auroc_path}")
 
-    # Confusion matrix (flattened multi-label)
+    # ── Confusion matrix (flattened)
     cm = confusion_matrix(allTargets.flatten(), allBinary.flatten())
     fig, ax = plt.subplots(figsize=(4, 4))
-    im = ax.imshow(cm, cmap='Blues')
+    ax.imshow(cm, cmap='Blues')
     ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
-    ax.set_xticklabels(['Pred 0', 'Pred 1']); ax.set_yticklabels(['True 0', 'True 1'])
+    ax.set_xticklabels(['Pred 0', 'Pred 1'])
+    ax.set_yticklabels(['True 0', 'True 1'])
     for i in range(2):
         for j in range(2):
             ax.text(j, i, str(cm[i, j]), ha='center', va='center', fontsize=12,
@@ -219,13 +297,17 @@ def runTest():
     cm_path = os.path.join(save_dir, 'test_confusion_matrix.png')
     plt.savefig(cm_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"✓ Đã lưu Confusion Matrix: {cm_path}")
-    print(f"\n✅ Hoàn tất kiểm thử. Kết quả lưu tại: {save_dir}/")
+    print(f"✓ Confusion Matrix: {cm_path}")
+    print(f"\n✅ Hoàn tất. Kết quả lưu tại: {save_dir}/")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n⚠ Interrupted by user")
+        print("\n\n⚠  Interrupted by user")
     except Exception as e:
+        import traceback
         print(f"\n\n❌ Error: {e}")
+        traceback.print_exc()

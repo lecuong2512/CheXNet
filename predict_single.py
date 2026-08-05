@@ -2,13 +2,13 @@
 # Dự đoán và visualize attention map cho một ảnh X-quang bất kỳ
 import os, sys
 import torch
-import torch.serialization  # Đã thêm vào đây để sửa lỗi UnboundLocalError
 import numpy as np
 import cv2
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image
 import torchvision.transforms as transforms
-from collections import OrderedDict
 
 # ── Đường dẫn tới thư mục chứa Model.py ──────────────────────────────────────
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Models')
@@ -16,6 +16,7 @@ if os.path.isdir(MODEL_DIR) and MODEL_DIR not in sys.path:
     sys.path.insert(0, MODEL_DIR)
 
 from Model import HybridCNNViTModel
+from checkpoint_utils import load_checkpoint_safe, extract_state_dict
 
 # ── Tên 15 nhãn bệnh ─────────────────────────────────────────────────────────
 CLASS_NAMES = [
@@ -24,25 +25,15 @@ CLASS_NAMES = [
     'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
 ]
 
+MAX_DISEASES_SHOWN = 6  # Giới hạn số bệnh hiển thị heatmap
+
 # ═════════════════════════════════════════════════════════════════════════════
 def load_model(model_path: str, model_size: str = 'base', img_size: int = 384):
     """Load model từ checkpoint, tự xử lý DataParallel prefix."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    try:
-        import numpy as _np
-        # Gọi trực tiếp thông qua torch.serialization đã import ở đầu file
-        torch.serialization.add_safe_globals([_np._core.multiarray.scalar])
-        ckpt = torch.load(model_path, map_location=device, weights_only=True)
-    except Exception:
-        ckpt = torch.load(model_path, map_location=device, weights_only=False)
-
-    state_dict = ckpt.get('state_dict', ckpt)
-    if any(k.startswith('module.') for k in state_dict):
-        state_dict = OrderedDict(
-            (k[7:] if k.startswith('module.') else k, v)
-            for k, v in state_dict.items()
-        )
+    ckpt = load_checkpoint_safe(model_path, device)
+    state_dict = extract_state_dict(ckpt)
 
     model = HybridCNNViTModel(num_classes=15, model_size=model_size, img_size=img_size)
     model.load_state_dict(state_dict)
@@ -59,13 +50,14 @@ def predict(model, device, image_path: str, img_size: int = 384,
     """
     Chạy inference một ảnh.
     Trả về:
-        probs        : np.ndarray (15,)  – xác suất từng lớp
-        positives    : list[str]         – tên các lớp vượt threshold
-        att_map      : np.ndarray (H, W) – attention map đã resize
-        original_np  : np.ndarray (H, W, 3) – ảnh gốc đã resize
+        probs        : np.ndarray (15,)           – xác suất từng lớp
+        positives    : list[str]                   – tên các lớp vượt threshold
+        att_maps     : np.ndarray (15, H_feat, W_feat) – 15 attention map thô (chưa resize)
+        original_np  : np.ndarray (img_size, img_size, 3) – ảnh gốc đã resize
     """
     transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
+        transforms.Resize(int(img_size * 1.14)),
+        transforms.CenterCrop(img_size),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
@@ -79,67 +71,89 @@ def predict(model, device, image_path: str, img_size: int = 384,
     probs = torch.sigmoid(logits)[0].cpu().numpy()
     positives = [CLASS_NAMES[i] for i, p in enumerate(probs) if p >= threshold]
 
-    # Xử lý attention map
-    att_np = attention_map.squeeze().cpu().numpy()
-    att_resized = cv2.resize(att_np, (img_size, img_size), interpolation=cv2.INTER_CUBIC)
+    # Attention map: [1, 15, H_feat, W_feat] → [15, H_feat, W_feat]
+    # KHÔNG resize ở đây — mỗi kênh sẽ được resize riêng trong visualize()
+    att_maps = attention_map[0].cpu().numpy()
 
     original_np = np.array(original_image.resize((img_size, img_size)))
-    return probs, positives, att_resized, original_np
+    return probs, positives, att_maps, original_np
 
 # ─────────────────────────────────────────────────────────────────────────────
-def visualize(probs, positives, att_map, original_np,
-              image_path: str, save_path: str = None, threshold: float = 0.5):
-    """Vẽ 4 panel: ảnh gốc | heatmap | overlay | bar chart xác suất."""
-
-    # Heatmap
-    att_norm = np.uint8(255 * (att_map - att_map.min()) /
-                        (att_map.max() - att_map.min() + 1e-8))
+def _make_heatmap_overlay(att_map_2d, original_np, img_size):
+    """Resize 1 attention map [H_feat, W_feat] → overlay heatmap trên ảnh gốc."""
+    att_resized = cv2.resize(att_map_2d, (img_size, img_size), interpolation=cv2.INTER_CUBIC)
+    att_norm = np.uint8(255 * (att_resized - att_resized.min()) /
+                        (att_resized.max() - att_resized.min() + 1e-8))
     heatmap = cv2.applyColorMap(att_norm, cv2.COLORMAP_JET)
     heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
     overlay = np.uint8(heatmap * 0.4 + original_np * 0.6)
+    return overlay
 
-    fig = plt.figure(figsize=(20, 6))
-    gs = fig.add_gridspec(1, 4)
 
-    # Panel 1 – ảnh gốc
+def visualize(probs, positives, att_maps, original_np,
+              image_path: str, save_path: str = None, threshold: float = 0.5,
+              img_size: int = 384):
+    """
+    Vẽ per-disease heatmap overlays:
+      Panel 1: Ảnh gốc
+      Panel 2..N: Heatmap overlay cho từng bệnh dương tính (tối đa MAX_DISEASES_SHOWN)
+      Panel cuối: Bar chart xác suất 15 lớp
+    """
+    # Xác định bệnh dương tính (loại No Finding), sắp xếp theo xác suất giảm dần
+    detected = [(i, CLASS_NAMES[i], probs[i]) for i in range(len(CLASS_NAMES))
+                if CLASS_NAMES[i] != 'No Finding' and probs[i] >= threshold]
+    detected.sort(key=lambda x: x[2], reverse=True)
+    detected = detected[:MAX_DISEASES_SHOWN]
+
+    # Nếu không phát hiện bệnh nào, hiển thị bệnh có xác suất cao nhất
+    if not detected:
+        candidates = [(i, CLASS_NAMES[i], probs[i]) for i in range(len(CLASS_NAMES))
+                      if CLASS_NAMES[i] != 'No Finding']
+        best = max(candidates, key=lambda x: x[2])
+        detected = [best]
+
+    n_panels = 1 + len(detected) + 1  # ảnh gốc + heatmaps + bar chart
+    fig = plt.figure(figsize=(5 * n_panels, 5))
+    gs = fig.add_gridspec(1, n_panels)
+
+    # Panel 1 – Ảnh gốc
     ax0 = fig.add_subplot(gs[0])
     ax0.imshow(original_np)
     ax0.set_title('Ảnh Gốc', fontsize=12, fontweight='bold')
     ax0.axis('off')
 
-    # Panel 2 – heatmap
-    ax1 = fig.add_subplot(gs[1])
-    ax1.imshow(heatmap)
-    ax1.set_title('Attention Map', fontsize=12, fontweight='bold')
-    ax1.axis('off')
+    # Panels 2..N – Per-disease heatmap overlays
+    for j, (disease_idx, disease_name, prob) in enumerate(detected):
+        ax = fig.add_subplot(gs[j + 1])
+        overlay = _make_heatmap_overlay(att_maps[disease_idx], original_np, img_size)
+        ax.imshow(overlay)
+        title_color = 'red' if prob >= 0.5 else 'orange'
+        ax.set_title(f'{disease_name}\n(p={prob:.3f})', fontsize=11,
+                     fontweight='bold', color=title_color)
+        ax.axis('off')
 
-    # Panel 3 – overlay
-    ax2 = fig.add_subplot(gs[2])
-    ax2.imshow(overlay)
-    label_str = '\n'.join(positives) if positives else 'No Finding'
-    ax2.set_title(f'Overlay\n({label_str})', fontsize=11, fontweight='bold', color='darkred')
-    ax2.axis('off')
-
-    # Panel 4 – bar chart xác suất
-    ax3 = fig.add_subplot(gs[3])
+    # Panel cuối – Bar chart xác suất
+    ax_bar = fig.add_subplot(gs[-1])
     colors = ['tomato' if p >= threshold else 'steelblue' for p in probs]
-    bars = ax3.barh(CLASS_NAMES[::-1], probs[::-1], color=colors[::-1], edgecolor='white', linewidth=0.4)
-    ax3.axvline(x=threshold, color='gray', linestyle='--', linewidth=1, label=f'Threshold={threshold}')
-    ax3.set_xlim(0, 1)
-    ax3.set_xlabel('Probability')
-    ax3.set_title('Xác suất từng lớp', fontsize=12, fontweight='bold')
-    ax3.legend(fontsize=9)
+    bars = ax_bar.barh(CLASS_NAMES[::-1], probs[::-1], color=colors[::-1],
+                       edgecolor='white', linewidth=0.4)
+    ax_bar.axvline(x=threshold, color='gray', linestyle='--', linewidth=1,
+                   label=f'Threshold={threshold}')
+    ax_bar.set_xlim(0, 1)
+    ax_bar.set_xlabel('Probability')
+    ax_bar.set_title('Xác suất từng lớp', fontsize=12, fontweight='bold')
+    ax_bar.legend(fontsize=9)
 
     # Ghi số lên bar
     for bar, prob in zip(bars, probs[::-1]):
-        ax3.text(min(prob + 0.02, 0.95), bar.get_y() + bar.get_height() / 2,
-                 f'{prob:.2f}', va='center', fontsize=8)
+        ax_bar.text(min(prob + 0.02, 0.95), bar.get_y() + bar.get_height() / 2,
+                    f'{prob:.2f}', va='center', fontsize=8)
 
     fig.suptitle(f'Kết quả dự đoán: {os.path.basename(image_path)}',
                  fontsize=13, fontweight='bold', y=1.02)
-    
+
     # Cố định layout tránh bóp méo đồ thị hoặc đè chữ khi lặp loop
-    fig.subplots_adjust(wspace=0.15, hspace=0, left=0.05, right=0.95, bottom=0.15, top=0.85)
+    fig.subplots_adjust(wspace=0.15, hspace=0, left=0.03, right=0.97, bottom=0.10, top=0.85)
 
     if save_path:
         os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
@@ -147,7 +161,7 @@ def visualize(probs, positives, att_map, original_np,
         print(f"💾 Đã lưu: {save_path}")
     else:
         plt.show()
-        
+
     plt.clf()
     plt.close()
 
@@ -178,7 +192,7 @@ def main():
 
         print("🔍 Đang xử lý...")
         try:
-            probs, positives, att_map, original_np = predict(
+            probs, positives, att_maps, original_np = predict(
                 model, device, image_path, img_size, threshold
             )
         except Exception as e:
@@ -200,8 +214,9 @@ def main():
         # Lưu ảnh visualize
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         save_path = os.path.join('Results', f'{base_name}_predict.png')
-        visualize(probs, positives, att_map, original_np,
-                  image_path, save_path=save_path, threshold=threshold)
+        visualize(probs, positives, att_maps, original_np,
+                  image_path, save_path=save_path, threshold=threshold,
+                  img_size=img_size)
         print()
 
 

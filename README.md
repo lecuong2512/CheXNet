@@ -1,6 +1,6 @@
-# CheXNet
+# CheXNet — Hybrid CNN-ViT
 
-CheXNet là dự án Deep Learning nhận diện 14 loại bệnh phổi từ ảnh X-ray, dựa trên kiến trúc DenseNet121 nổi tiếng trong nghiên cứu AI y tế.
+Dự án Deep Learning nhận diện 15 loại bệnh phổi từ ảnh X-ray, sử dụng kiến trúc lai ConvNeXtV2 + SwinV2 với Residual Masking và huấn luyện 2 giai đoạn (NIH Chest X-ray + VinDr-CXR).
 
 ## Mục tiêu
 - Huấn luyện và đánh giá mô hình phân loại các bệnh phổi từ ảnh X-ray.
@@ -36,9 +36,9 @@ python main.py
 
 ## Kiến trúc code
 - **main.py**: Quản lý quá trình train/test.
-- **Models/TrainModel.py**: Định nghĩa class ChexnetTrainer (train, test, tính AUROC).
-- **Models/Model.py**: Định nghĩa mô hình DenseNet121.
-- **Models/read_data.py**: Chuẩn bị dữ liệu cho DataLoader.
+- **Models/TrainModel.py**: Định nghĩa class HybridTrainer (train 2 giai đoạn, AMP BF16, tính AUROC).
+- **Models/Model.py**: Định nghĩa mô hình Hybrid ConvNeXtV2 + SwinV2 với Residual Masking.
+- **Models/read_data.py**: Chuẩn bị dữ liệu cho DataLoader, HybridBatchSampler.
 - **Database/batch_download_zips.py**: Script tải và giải nén dữ liệu.
 
 ## Kết quả
