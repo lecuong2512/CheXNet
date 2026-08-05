@@ -37,6 +37,18 @@ class HybridCNNViTModel(nn.Module):
         # 1. Local Feature Extractor (CNN)
         self.cnn = timm.create_model(cnn_name, pretrained=True, features_only=True)
         
+        # FPN for multi-scale attention map
+        cnn_feature_info = self.cnn.feature_info
+        self.cnn_stage3_dim = cnn_feature_info[-2]['num_chs']
+        self.cnn_stage4_dim = cnn_feature_info[-1]['num_chs']
+        
+        self.fpn_lateral = nn.Conv2d(self.cnn_stage3_dim, swin_dim, kernel_size=1)
+        self.fpn_merge = nn.Sequential(
+            nn.Conv2d(swin_dim, swin_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(swin_dim),
+            nn.GELU(),
+        )
+
         # Projector để đồng bộ số kênh giữa CNN và ViT (nếu cần)
         self.channel_proj = nn.Conv2d(cnn_dim, swin_dim, kernel_size=1) if cnn_dim != swin_dim else nn.Identity()
 
@@ -101,7 +113,9 @@ class HybridCNNViTModel(nn.Module):
 
     def forward(self, x):
         # 1. Trích xuất đặc trưng cục bộ
-        cnn_features = self.cnn(x)[-1] 
+        cnn_all = self.cnn(x)
+        cnn_features_low = cnn_all[-2]
+        cnn_features = cnn_all[-1] 
         cnn_features = self.channel_proj(cnn_features)
         
         # Chuẩn bị shape cho SwinV2
@@ -112,8 +126,20 @@ class HybridCNNViTModel(nn.Module):
         vit_features = self.vit_norm(vit_features)
         vit_features = vit_features.permute(0, 3, 1, 2)
 
+        # FPN: upsample coarse vit_features to match higher-res stage[-2]
+        lateral = self.fpn_lateral(cnn_features_low)
+        vit_up = F.interpolate(vit_features, size=lateral.shape[2:], mode='bilinear', align_corners=False)
+        fpn_features = self.fpn_merge(vit_up + lateral)
+
         # 3. Sinh Attention Map (Mask) [B, num_classes, H, W] - 1 kênh/bệnh
-        attention_map = self.attention_head(vit_features) 
+        attention_map_hires = self.attention_head(fpn_features) 
+        attention_map = attention_map_hires
+        
+        # Cho gated residual attention, downscale về kích thước coarse
+        attention_map_coarse = F.interpolate(
+            attention_map_hires, size=cnn_features.shape[2:],
+            mode='bilinear', align_corners=False
+        )
 
         # ====================================================================
         # Gated Residual Attention theo NHÓM KÊNH (per-class channel grouping)
@@ -137,7 +163,7 @@ class HybridCNNViTModel(nn.Module):
         for k, group_size in enumerate(self.channel_group_sizes):
             ch_end = ch_start + group_size
             group_features = cnn_features[:, ch_start:ch_end, :, :]
-            group_attention = attention_map[:, k:k+1, :, :]  # [B,1,H,W], broadcast theo kênh
+            group_attention = attention_map_coarse[:, k:k+1, :, :]  # [B,1,H,W], broadcast theo kênh
             highlighted_group = group_features * group_attention
             gated_group = group_features + gate_alpha * highlighted_group
             gated_groups.append(gated_group)

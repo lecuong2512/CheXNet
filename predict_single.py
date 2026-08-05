@@ -46,7 +46,7 @@ def load_model(model_path: str, model_size: str = 'base', img_size: int = 384):
 
 # ─────────────────────────────────────────────────────────────────────────────
 def predict(model, device, image_path: str, img_size: int = 384,
-            threshold: float = 0.5):
+            threshold: float = 0.5, optimal_thresholds: np.ndarray = None):
     """
     Chạy inference một ảnh.
     Trả về:
@@ -69,7 +69,12 @@ def predict(model, device, image_path: str, img_size: int = 384,
         logits, attention_map = model(input_tensor)
 
     probs = torch.sigmoid(logits)[0].cpu().numpy()
-    positives = [CLASS_NAMES[i] for i, p in enumerate(probs) if p >= threshold]
+    # Dùng per-class threshold nếu có, không thì dùng threshold cố định
+    if optimal_thresholds is not None:
+        positives = [CLASS_NAMES[i] for i, p in enumerate(probs)
+                     if p >= optimal_thresholds[i]]
+    else:
+        positives = [CLASS_NAMES[i] for i, p in enumerate(probs) if p >= threshold]
 
     # Attention map: [1, 15, H_feat, W_feat] → [15, H_feat, W_feat]
     # KHÔNG resize ở đây — mỗi kênh sẽ được resize riêng trong visualize()
@@ -92,7 +97,7 @@ def _make_heatmap_overlay(att_map_2d, original_np, img_size):
 
 def visualize(probs, positives, att_maps, original_np,
               image_path: str, save_path: str = None, threshold: float = 0.5,
-              img_size: int = 384):
+              img_size: int = 384, optimal_thresholds: np.ndarray = None):
     """
     Vẽ per-disease heatmap overlays:
       Panel 1: Ảnh gốc
@@ -100,8 +105,12 @@ def visualize(probs, positives, att_maps, original_np,
       Panel cuối: Bar chart xác suất 15 lớp
     """
     # Xác định bệnh dương tính (loại No Finding), sắp xếp theo xác suất giảm dần
-    detected = [(i, CLASS_NAMES[i], probs[i]) for i in range(len(CLASS_NAMES))
-                if CLASS_NAMES[i] != 'No Finding' and probs[i] >= threshold]
+    if optimal_thresholds is not None:
+        detected = [(i, CLASS_NAMES[i], probs[i]) for i in range(len(CLASS_NAMES))
+                    if CLASS_NAMES[i] != 'No Finding' and probs[i] >= optimal_thresholds[i]]
+    else:
+        detected = [(i, CLASS_NAMES[i], probs[i]) for i in range(len(CLASS_NAMES))
+                    if CLASS_NAMES[i] != 'No Finding' and probs[i] >= threshold]
     detected.sort(key=lambda x: x[2], reverse=True)
     detected = detected[:MAX_DISEASES_SHOWN]
 
@@ -127,18 +136,23 @@ def visualize(probs, positives, att_maps, original_np,
         ax = fig.add_subplot(gs[j + 1])
         overlay = _make_heatmap_overlay(att_maps[disease_idx], original_np, img_size)
         ax.imshow(overlay)
-        title_color = 'red' if prob >= 0.5 else 'orange'
+        thr_for_color = optimal_thresholds[disease_idx] if optimal_thresholds is not None else threshold
+        title_color = 'red' if prob >= thr_for_color else 'orange'
         ax.set_title(f'{disease_name}\n(p={prob:.3f})', fontsize=11,
                      fontweight='bold', color=title_color)
         ax.axis('off')
 
     # Panel cuối – Bar chart xác suất
     ax_bar = fig.add_subplot(gs[-1])
-    colors = ['tomato' if p >= threshold else 'steelblue' for p in probs]
+    if optimal_thresholds is not None:
+        colors = ['tomato' if p >= optimal_thresholds[i] else 'steelblue' for i, p in enumerate(probs)]
+    else:
+        colors = ['tomato' if p >= threshold else 'steelblue' for p in probs]
     bars = ax_bar.barh(CLASS_NAMES[::-1], probs[::-1], color=colors[::-1],
                        edgecolor='white', linewidth=0.4)
-    ax_bar.axvline(x=threshold, color='gray', linestyle='--', linewidth=1,
-                   label=f'Threshold={threshold}')
+    if optimal_thresholds is None:
+        ax_bar.axvline(x=threshold, color='gray', linestyle='--', linewidth=1,
+                       label=f'Threshold={threshold}')
     ax_bar.set_xlim(0, 1)
     ax_bar.set_xlabel('Probability')
     ax_bar.set_title('Xác suất từng lớp', fontsize=12, fontweight='bold')
@@ -179,6 +193,15 @@ def main():
 
     model, device = load_model(model_path, model_size, img_size)
 
+    # Load optimal thresholds nếu có
+    thresholds_file = os.path.join('Results', 'optimal_thresholds.npy')
+    optimal_thresholds = None
+    if os.path.isfile(thresholds_file):
+        optimal_thresholds = np.load(thresholds_file)
+        print(f"✅ Đã load per-class optimal thresholds từ {thresholds_file}")
+    else:
+        print(f"ℹ️  Không tìm thấy {thresholds_file} — dùng threshold cố định {threshold}")
+
     print("\n📌 Nhập đường dẫn ảnh để dự đoán. Gõ 'q' để thoát.\n")
 
     while True:
@@ -193,7 +216,8 @@ def main():
         print("🔍 Đang xử lý...")
         try:
             probs, positives, att_maps, original_np = predict(
-                model, device, image_path, img_size, threshold
+                model, device, image_path, img_size, threshold,
+                optimal_thresholds=optimal_thresholds
             )
         except Exception as e:
             print(f"❌ Lỗi khi xử lý ảnh: {e}")

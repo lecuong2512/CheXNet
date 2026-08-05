@@ -125,6 +125,12 @@ def runTrain(resume: bool = False):
     # ── G. Số epoch
     trMaxEpoch = int(input("\nSố Epoch tối đa cho lần chạy này [50]: ").strip() or "50")
 
+    # ── H. torch.compile (công tắc cứng)
+    print("\n⚡ torch.compile:")
+    print("  Tăng tốc 10-20% nhưng có thể gây lỗi khi dùng multi-GPU.")
+    use_compile_input = input("  Bật torch.compile? [y/n, mặc định n]: ").strip().lower()
+    use_torch_compile = (use_compile_input == 'y')
+
     print("\n" + "=" * 80)
     if resume and resume_path:
         print("🔄 TIẾP TỤC HUẤN LUYỆN TỪ CHECKPOINT")
@@ -144,6 +150,7 @@ def runTrain(resume: bool = False):
         preload_images=preload_images,
         num_workers_preload=num_workers_preload,
         resume_path=resume_path,
+        use_torch_compile=use_torch_compile,
     )
 
 
@@ -240,23 +247,92 @@ def runTest():
 
     allPreds   = torch.cat(allPreds,   dim=0).numpy()
     allTargets = torch.cat(allTargets, dim=0).numpy()
-    allBinary  = (allPreds >= 0.5).astype(int)
+    # ── Per-class optimal threshold (Youden's J statistic)
+    from sklearn.metrics import f1_score, precision_recall_curve, average_precision_score
+    
+    optimal_thresholds = []
+    for i in range(allPreds.shape[1]):
+        # Youden's J = sensitivity + specificity - 1 = TPR - FPR
+        from sklearn.metrics import roc_curve
+        fpr, tpr, thresholds_roc = roc_curve(allTargets[:, i], allPreds[:, i])
+        j_scores = tpr - fpr
+        best_idx = np.argmax(j_scores)
+        optimal_thresholds.append(thresholds_roc[best_idx])
+    optimal_thresholds = np.array(optimal_thresholds)
+    
 
-    # ── Per-class AUROC
-    print("\n" + "=" * 60)
+    allBinary_fixed = (allPreds >= 0.5).astype(int)
+    allBinary_optimal = (allPreds >= optimal_thresholds[None, :]).astype(int)
+
+    # ── Per-class AUROC + PR-AUC + F1
+    print("\n" + "=" * 80)
     print("📊 KẾT QUẢ KIỂM THỬ")
-    print("=" * 60)
-    aurocs = []
+    print("=" * 80)
+    print(f"  {'Bệnh':<22} {'AUROC':>8} {'PR-AUC':>8} {'Thr*':>6} {'F1@0.5':>8} {'F1@Thr*':>8}")
+    print("  " + "-" * 66)
+    aurocs, pr_aucs = [], []
     for i, name in enumerate(CLASS_NAMES):
         try:
             auc = roc_auc_score(allTargets[:, i], allPreds[:, i])
-            aurocs.append(auc)
-            print(f"  {name:<22}: AUROC = {auc:.4f}")
         except Exception:
-            aurocs.append(float('nan'))
-            print(f"  {name:<22}: AUROC = N/A")
-    mean_auroc = float(__import__('numpy').nanmean(aurocs))
-    print(f"\n  {'Mean AUROC':<22}: {mean_auroc:.4f}")
+            auc = float('nan')
+        try:
+            pr_auc = average_precision_score(allTargets[:, i], allPreds[:, i])
+        except Exception:
+            pr_auc = float('nan')
+        aurocs.append(auc)
+        pr_aucs.append(pr_auc)
+        f1_fixed = f1_score(allTargets[:, i], allBinary_fixed[:, i], zero_division=0)
+        f1_opt = f1_score(allTargets[:, i], allBinary_optimal[:, i], zero_division=0)
+        print(f"  {name:<22} {auc:>8.4f} {pr_auc:>8.4f} {optimal_thresholds[i]:>6.3f} {f1_fixed:>8.4f} {f1_opt:>8.4f}")
+    
+    mean_auroc = float(np.nanmean(aurocs))
+    mean_pr_auc = float(np.nanmean(pr_aucs))
+    print("  " + "-" * 66)
+    print(f"  {'Mean':<22} {mean_auroc:>8.4f} {mean_pr_auc:>8.4f}")
+
+    # ── Bootstrap 95% CI cho Mean AUROC
+    print("\n📈 Bootstrap 95% Confidence Intervals (N=1000):")
+    n_bootstrap = 1000
+    rng = np.random.RandomState(42)
+    boot_aurocs = []
+    boot_pr_aucs = []
+    n_samples = len(allTargets)
+    for _ in range(n_bootstrap):
+        indices = rng.randint(0, n_samples, size=n_samples)
+        boot_gt = allTargets[indices]
+        boot_pred = allPreds[indices]
+        try:
+            boot_auroc = np.nanmean([
+                roc_auc_score(boot_gt[:, i], boot_pred[:, i])
+                for i in range(boot_gt.shape[1])
+                if len(np.unique(boot_gt[:, i])) > 1
+            ])
+            boot_aurocs.append(boot_auroc)
+        except Exception:
+            pass
+        try:
+            boot_pr = np.nanmean([
+                average_precision_score(boot_gt[:, i], boot_pred[:, i])
+                for i in range(boot_gt.shape[1])
+                if boot_gt[:, i].sum() > 0
+            ])
+            boot_pr_aucs.append(boot_pr)
+        except Exception:
+            pass
+    
+    auroc_ci = np.percentile(boot_aurocs, [2.5, 97.5])
+    pr_auc_ci = np.percentile(boot_pr_aucs, [2.5, 97.5])
+    print(f"  Mean AUROC:  {mean_auroc:.4f} [{auroc_ci[0]:.4f}, {auroc_ci[1]:.4f}]")
+    print(f"  Mean PR-AUC: {mean_pr_auc:.4f} [{pr_auc_ci[0]:.4f}, {pr_auc_ci[1]:.4f}]")
+
+    # ── Lưu optimal thresholds vào file riêng để predict_single.py dùng
+    thresholds_path = os.path.join(save_dir, 'optimal_thresholds.npy')
+    np.save(thresholds_path, optimal_thresholds)
+    print(f"\n💾 Đã lưu per-class optimal thresholds tại: {thresholds_path}")
+    print(f"   Dùng cho predict_single.py để thay thế threshold cố định 0.5")
+
+    allBinary = allBinary_fixed  # dùng cho classification_report & confusion matrix
 
     # Classification report
     print("\n📋 Classification Report (threshold=0.5):")

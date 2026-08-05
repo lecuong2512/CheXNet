@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import torchvision.transforms as transforms
 from sklearn.metrics import roc_auc_score, accuracy_score
 from typing import Optional
@@ -16,6 +18,20 @@ import copy
 from Model import HybridCNNViTModel
 from read_data import DatasetGenerator, FastDataLoader, HybridBatchSampler, VINDR_SOURCE_NAME
 from checkpoint_utils import load_checkpoint_safe, extract_state_dict
+
+
+def _unwrap_model(model):
+    """Trích xuất model gốc từ DataParallel/DDP wrapper."""
+    if isinstance(model, (nn.DataParallel, DDP)):
+        return model.module
+    return model
+
+
+def _is_main_process():
+    """True nếu là process chính (rank 0 hoặc không dùng DDP)."""
+    if dist.is_initialized():
+        return dist.get_rank() == 0
+    return True
 
 
 class AsymmetricLossOptimized(nn.Module):
@@ -228,6 +244,29 @@ class AttentionSparsityLoss(nn.Module):
 
         return self.density_weight * density_loss + self.entropy_weight * entropy_loss
 
+class UncertaintyWeighting(nn.Module):
+    """Kendall & Gal 2018 — Uncertainty-based automatic multi-task loss weighting.
+    
+    Thay vì chỉnh tay trọng số loss (vd dice*2.0, sparsity*0.2), học log(σ²)
+    cho mỗi task. Loss = Σ (1/(2σ²_i)) * L_i + log(σ²_i).
+    Khi một loss giảm nhanh, σ²_i tự tăng (giảm trọng số) để model phân bổ
+    capacity sang task khác.
+    """
+    def __init__(self, n_tasks=3):
+        super().__init__()
+        # Khởi tạo log(σ²) = 0 → σ² = 1 → trọng số ban đầu = 0.5
+        self.log_vars = nn.Parameter(torch.zeros(n_tasks))
+    
+    def forward(self, *losses):
+        total = 0
+        weighted_losses = []
+        for i, loss in enumerate(losses):
+            precision = torch.exp(-self.log_vars[i])  # 1/σ²
+            weighted = precision * loss + self.log_vars[i]
+            total += weighted
+            weighted_losses.append(weighted.item())
+        return total, weighted_losses
+
 class HybridTrainer:
     CLASS_NAMES = [
         'No Finding', 'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
@@ -241,7 +280,7 @@ class HybridTrainer:
               model_size: str, img_size: int, trBatchSize: int, trMaxEpoch: int,
               pathModel: str = 'Trainedmodel/hybrid_model.pth',
               preload_images: bool = False, num_workers_preload: int = 8,
-              resume_path: str = None):
+              resume_path: str = None, use_torch_compile: bool = False):
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"\nDevice: {device}")
@@ -272,21 +311,50 @@ class HybridTrainer:
         print(f"\n🏗️ Building Hybrid Model ({model_size.upper()})...")
         model = HybridCNNViTModel(num_classes=15, model_size=model_size, img_size=img_size).to(device)
         
+        # Multi-GPU: ưu tiên DDP > DataParallel
+        #   DDP: mỗi GPU chạy 1 process riêng, không bị GIL bottleneck,
+        #        throughput gần tuyến tính theo số GPU.
+        #   DataParallel: dùng 1 process, bị GIL → chỉ hiệu quả ~60-70%.
+        #
+        # Để dùng DDP, khởi động bằng:
+        #   torchrun --nproc_per_node=N main.py
+        # Nếu không dùng torchrun, tự động fallback về DataParallel.
+        use_ddp = False
         if torch.cuda.device_count() > 1:
-            model = torch.nn.DataParallel(model)
+            if 'LOCAL_RANK' in os.environ:
+                # DDP: được khởi động bởi torchrun
+                local_rank = int(os.environ['LOCAL_RANK'])
+                if not dist.is_initialized():
+                    dist.init_process_group(backend='nccl')
+                torch.cuda.set_device(local_rank)
+                device = torch.device(f'cuda:{local_rank}')
+                model = model.to(device)
+                model = DDP(model, device_ids=[local_rank])
+                use_ddp = True
+                if _is_main_process():
+                    print(f"🚀 DDP: ENABLED ({torch.cuda.device_count()} GPUs, rank {dist.get_rank()})")
+            else:
+                # Fallback: DataParallel
+                model = torch.nn.DataParallel(model)
+                print(f"⚠️  DataParallel: {torch.cuda.device_count()} GPUs "
+                      f"(dùng `torchrun --nproc_per_node={torch.cuda.device_count()} main.py` để tăng tốc với DDP)")
 
         # ── torch.compile (PyTorch 2.0+) ──
-        if device.type == 'cuda' and hasattr(torch, 'compile'):
+        # Công tắc cứng: multi-GPU (DataParallel/DDP) có thể gây lỗi với
+        # torch.compile — chỉ bật khi use_torch_compile=True.
+        if use_torch_compile and device.type == 'cuda' and hasattr(torch, 'compile'):
             try:
-                compile_target = model.module if isinstance(model, nn.DataParallel) else model
+                compile_target = _unwrap_model(model)
                 compiled = torch.compile(compile_target, mode='reduce-overhead')
-                if isinstance(model, nn.DataParallel):
+                if isinstance(model, (nn.DataParallel, DDP)):
                     model.module = compiled
                 else:
                     model = compiled
                 print("⚡ torch.compile: ENABLED (reduce-overhead mode)")
             except Exception as e:
                 print(f"⚠️  torch.compile không khả dụng: {e}")
+        elif not use_torch_compile:
+            print("ℹ️  torch.compile: DISABLED (use_torch_compile=False)")
 
         # ---- Resume từ checkpoint cũ nếu được yêu cầu
         resume_epoch = 0
@@ -296,7 +364,7 @@ class HybridTrainer:
             print(f"\n🔄 Resume từ checkpoint: {resume_path}")
             ckpt = load_checkpoint_safe(resume_path, device)
             state_dict = extract_state_dict(ckpt)
-            target_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+            target_model = _unwrap_model(model)
             target_model.load_state_dict(state_dict)
             resume_epoch      = ckpt.get('epoch', 0)
             resume_stage      = ckpt.get('stage', 1)
@@ -369,9 +437,22 @@ class HybridTrainer:
         
         num_workers = min(12, os.cpu_count() or 4)
         
+        # DDP: dùng DistributedSampler để chia data giữa các GPU
+        ddp_sampler_stage1 = None
+        ddp_sampler_val = None
+        if use_ddp:
+            ddp_sampler_stage1 = torch.utils.data.distributed.DistributedSampler(
+                vin_subset_train, shuffle=True
+            )
+            ddp_sampler_val = torch.utils.data.distributed.DistributedSampler(
+                datasetVal, shuffle=False
+            )
+
         # DataLoader GĐ1
         loader_stage1 = FastDataLoader.create_dataloader(
-            vin_subset_train, batch_size=trBatchSize, shuffle=True, num_workers=num_workers
+            vin_subset_train, batch_size=trBatchSize,
+            shuffle=(ddp_sampler_stage1 is None), num_workers=num_workers,
+            sampler=ddp_sampler_stage1
         )
         
         # DataLoader GĐ2 (Hybrid 1:3 Batch Sampler)
@@ -382,7 +463,8 @@ class HybridTrainer:
         )
         
         dataLoaderVal = FastDataLoader.create_dataloader(
-            datasetVal, batch_size=trBatchSize, shuffle=False, num_workers=num_workers
+            datasetVal, batch_size=trBatchSize, shuffle=False, num_workers=num_workers,
+            sampler=ddp_sampler_val
         )
 
         # ---- Optimizers & Loss
@@ -418,6 +500,10 @@ class HybridTrainer:
         criterion_val = nn.BCEWithLogitsLoss()
         criterion_dice = DiceLoss()
         criterion_sparsity = AttentionSparsityLoss()
+
+        # Uncertainty weighting: tự động cân bằng trọng số BCE, Dice, Sparsity
+        uncertainty_weights = UncertaintyWeighting(n_tasks=3).to(device)
+        optimizer.add_param_group({'params': uncertainty_weights.parameters(), 'lr': 1e-3})
 
         # ── EMA: khởi tạo từ trọng số hiện tại (đã load checkpoint nếu resume) ──
         # Khi resume, state_dict trong checkpoint đã chứa EMA weights (được lưu
@@ -459,15 +545,21 @@ class HybridTrainer:
             global_epoch = resume_epoch + epoch + 1
             print(f"\n{'='*60}\nEpoch [{global_epoch}] (session epoch {epoch+1}/{trMaxEpoch}) - STAGE {stage}\n{'='*60}")
 
+            # DDP: set epoch cho DistributedSampler để shuffle khác mỗi epoch
+            if use_ddp and stage == 1 and ddp_sampler_stage1 is not None:
+                ddp_sampler_stage1.set_epoch(global_epoch)
+            if use_ddp and ddp_sampler_val is not None:
+                ddp_sampler_val.set_epoch(global_epoch)
+
             # Train
             no_finding_idx = HybridTrainer.CLASS_NAMES.index('No Finding')
             trainLoss, bceLoss, diceLoss, sparsityLoss = HybridTrainer.epochTrain(
                 model, current_loader, optimizer, criterion_bce, criterion_dice, criterion_sparsity, device, stage,
-                no_finding_idx=no_finding_idx, scaler=scaler, amp_dtype=amp_dtype, ema=ema
+                no_finding_idx=no_finding_idx, scaler=scaler, amp_dtype=amp_dtype, ema=ema, uncertainty_weights=uncertainty_weights
             )
 
             # Val: dùng EMA weights để đánh giá (tổng quát hơn training weights)
-            target_model_ref = model.module if isinstance(model, torch.nn.DataParallel) else model
+            target_model_ref = _unwrap_model(model)
             ema.apply_shadow(target_model_ref)
             valLoss, valAUROC, valAcc = HybridTrainer.epochVal(
                 model, dataLoaderVal, criterion_val, device,
@@ -524,27 +616,29 @@ class HybridTrainer:
             if valAUROC > bestAUROC:
                 bestAUROC = valAUROC
                 epochs_no_improve = 0
-                os.makedirs(os.path.dirname(pathModel) or '.', exist_ok=True)
+                # DDP: chỉ rank 0 lưu checkpoint (tránh race condition ghi file)
+                if _is_main_process():
+                    os.makedirs(os.path.dirname(pathModel) or '.', exist_ok=True)
 
-                # Lưu state_dict đầy đủ: lấy full model state (bao gồm cả
-                # buffers như BatchNorm running_mean/running_var) rồi ghi đè
-                # các PARAMETERS bằng trọng số EMA (tổng quát hơn training weights).
-                # Cách cũ (chỉ lưu ema.shadow) thiếu buffers → lỗi Missing key
-                # khi load lại cho test/inference.
-                ema_model = model.module if isinstance(model, torch.nn.DataParallel) else model
-                full_state = ema_model.state_dict()  # copy đầy đủ cả params + buffers
-                for name, ema_param in ema.shadow.items():
-                    if name in full_state:
-                        full_state[name] = ema_param.cpu()
-                torch.save({
-                    'epoch': global_epoch,
-                    'state_dict': full_state,
-                    'best_auroc': bestAUROC,
-                    'stage': stage,
-                    'model_size': model_size,
-                    'img_size': img_size,
-                }, pathModel)
-                print(f"✅ Model saved (epoch {global_epoch}, AUROC: {bestAUROC:.4f})")
+                    # Lưu state_dict đầy đủ: lấy full model state (bao gồm cả
+                    # buffers như BatchNorm running_mean/running_var) rồi ghi đè
+                    # các PARAMETERS bằng trọng số EMA (tổng quát hơn training weights).
+                    # Cách cũ (chỉ lưu ema.shadow) thiếu buffers → lỗi Missing key
+                    # khi load lại cho test/inference.
+                    ema_model = _unwrap_model(model)
+                    full_state = ema_model.state_dict()  # copy đầy đủ cả params + buffers
+                    for name, ema_param in ema.shadow.items():
+                        if name in full_state:
+                            full_state[name] = ema_param.cpu()
+                    torch.save({
+                        'epoch': global_epoch,
+                        'state_dict': full_state,
+                        'best_auroc': bestAUROC,
+                        'stage': stage,
+                        'model_size': model_size,
+                        'img_size': img_size,
+                    }, pathModel)
+                    print(f"✅ Model saved (epoch {global_epoch}, AUROC: {bestAUROC:.4f})")
             else:
                 epochs_no_improve += 1
                 print(f"⏳ No improvement ({epochs_no_improve}/{early_stop_patience})")
@@ -553,9 +647,13 @@ class HybridTrainer:
                           f"(patience={early_stop_patience})")
                     break
 
+        # DDP cleanup
+        if use_ddp and dist.is_initialized():
+            dist.destroy_process_group()
+
     @staticmethod
     def epochTrain(model, dataLoader, optimizer, criterion_bce, criterion_dice, criterion_sparsity, device, stage,
-                   no_finding_idx=0, scaler=None, amp_dtype=torch.float32, ema=None):
+                   no_finding_idx=0, scaler=None, amp_dtype=torch.float32, ema=None, uncertainty_weights=None):
         model.train()
         total_loss, total_bce, total_dice, total_sparsity = 0.0, 0.0, 0.0, 0.0
         n_dice_batches = 0
@@ -584,10 +682,8 @@ class HybridTrainer:
             
             vin_mask = (source_flags == 1)
             
-            loss = 0
             # Tính BCE cho tất cả
             bce_loss = criterion_bce(logits, targets.float())
-            loss += bce_loss
             total_bce += bce_loss.item()
 
             # Sparsity/Entropy regularization áp dụng cho TOÀN BỘ batch (kể cả ảnh
@@ -596,9 +692,9 @@ class HybridTrainer:
             # Nếu không có dòng này, attention vẫn có thể collapse về ~1.0 trên 75%
             # ảnh còn lại mà không bị phạt gì.
             sparsity_loss = criterion_sparsity(attention_maps)
-            loss += sparsity_loss * 0.2  # giảm từ 0.3 để tránh sparsity lấn át Dice khi đã đạt density target
             total_sparsity += sparsity_loss.item()
             
+            dice_loss_val = torch.tensor(0.0, device=device)
             # Tính Dice Loss cho VinDr - CHỈ trên các kênh THỰC SỰ có GT bbox.
             # Quy tắc xác định kênh hợp lệ: với dữ liệu VinDr-CXR, mỗi nhãn dương
             # (label=1) cho 1 bệnh LUÔN đi kèm bbox tương ứng (đã kiểm chứng trên
@@ -613,17 +709,24 @@ class HybridTrainer:
                 valid_mask = (vin_labels > 0.5)
                 valid_mask[:, no_finding_idx] = False  # No Finding không có bbox
 
-                dice_loss = criterion_dice(vin_attention, vin_gt_masks, valid_mask)
-                # GĐ1: trọng số RẤT cao vì đây là giai đoạn warm-up CHUYÊN BIỆT cho
-                # attention (mục tiêu chính, không phải phụ) - toàn bộ batch GĐ1 đều
-                # là VinDr có GT nên không lo Dice bị "loãng" giữa các ảnh không có mask.
-                # GĐ2: vẫn giữ trọng số cao hơn baseline cũ (1.2) vì 75% ảnh không có GT
-                # mask -> nếu giảm giám sát Dice ngay lúc này, attention_head dễ "lười"
-                # và bão hòa để chỉ tối ưu BCE, khiến attention không còn phản ánh đúng
-                # vùng tổn thương.
-                loss += dice_loss * (2.0 if stage == 1 else 1.2)
-                total_dice += dice_loss.item()
+                dice_loss_val = criterion_dice(vin_attention, vin_gt_masks, valid_mask)
+                total_dice += dice_loss_val.item()
                 n_dice_batches += 1
+
+            # Uncertainty weighting tự động cân bằng 3 loss components
+            if uncertainty_weights is not None:
+                loss, _ = uncertainty_weights(bce_loss, dice_loss_val, sparsity_loss)
+            else:
+                loss = bce_loss + dice_loss_val * (2.0 if stage == 1 else 1.2) + sparsity_loss * 0.2
+
+            # No Finding consistency: phạt khi P(No Finding) cao + max(P(bệnh)) cũng cao
+            probs_all = torch.sigmoid(logits)
+            p_no_finding = probs_all[:, no_finding_idx]
+            p_diseases = torch.cat([probs_all[:, :no_finding_idx], probs_all[:, no_finding_idx+1:]], dim=1)
+            p_max_disease = p_diseases.max(dim=1)[0]
+            # Consistency penalty: p_no_finding * p_max_disease → 0 khi chỉ 1 trong 2 cao
+            consistency_loss = (p_no_finding * p_max_disease).mean()
+            loss = loss + consistency_loss * 0.1
                 
             # AMP backward + optimizer step
             if scaler is not None:
@@ -636,7 +739,7 @@ class HybridTrainer:
 
             # EMA update sau mỗi optimizer step
             if ema is not None:
-                ema_target = model.module if isinstance(model, torch.nn.DataParallel) else model
+                ema_target = _unwrap_model(model)
                 ema.update(ema_target)
 
             total_loss += loss.item()
