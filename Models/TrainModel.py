@@ -470,6 +470,22 @@ class HybridTrainer:
         # ---- Optimizers & Loss
         optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
+        # ASL thay thế BCE: giảm trọng số các ca âm tính dễ, tập trung vào
+        # ca dương tính và ca khó → đặc biệt hiệu quả khi positive rate < 5%
+        # như dữ liệu X-quang (Hernia ~0.2%, Emphysema ~2%).
+        criterion_bce = AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05)
+        # Giữ BCEWithLogitsLoss riêng cho validation để có val loss comparable
+        criterion_val = nn.BCEWithLogitsLoss()
+        criterion_dice = DiceLoss()
+        criterion_sparsity = AttentionSparsityLoss()
+
+        # Uncertainty weighting: tự động cân bằng trọng số BCE, Dice, Sparsity
+        # QUAN TRỌNG: phải add_param_group TRƯỚC khi tạo scheduler, vì scheduler
+        # ghi nhận số param groups lúc khởi tạo. Nếu add sau → scheduler chỉ
+        # tạo LR cho 1 group nhưng optimizer có 2 → crash khi scheduler.step().
+        uncertainty_weights = UncertaintyWeighting(n_tasks=3).to(device)
+        optimizer.add_param_group({'params': uncertainty_weights.parameters(), 'lr': 1e-3})
+
         # Scheduler: warmup chỉ áp dụng khi bắt đầu stage 1 từ đầu.
         # Nếu resume vào stage 2 thì dùng CosineAnnealingLR thuần — model đã ổn định,
         # warmup lại từ lr=1e-5 sẽ làm chậm không cần thiết.
@@ -492,24 +508,11 @@ class HybridTrainer:
                 milestones=[warmup_epochs]
             )
 
-        # ASL thay thế BCE: giảm trọng số các ca âm tính dễ, tập trung vào
-        # ca dương tính và ca khó → đặc biệt hiệu quả khi positive rate < 5%
-        # như dữ liệu X-quang (Hernia ~0.2%, Emphysema ~2%).
-        criterion_bce = AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05)
-        # Giữ BCEWithLogitsLoss riêng cho validation để có val loss comparable
-        criterion_val = nn.BCEWithLogitsLoss()
-        criterion_dice = DiceLoss()
-        criterion_sparsity = AttentionSparsityLoss()
-
-        # Uncertainty weighting: tự động cân bằng trọng số BCE, Dice, Sparsity
-        uncertainty_weights = UncertaintyWeighting(n_tasks=3).to(device)
-        optimizer.add_param_group({'params': uncertainty_weights.parameters(), 'lr': 1e-3})
-
         # ── EMA: khởi tạo từ trọng số hiện tại (đã load checkpoint nếu resume) ──
         # Khi resume, state_dict trong checkpoint đã chứa EMA weights (được lưu
         # bằng cách ghi đè params trong full_state). Model đã load state_dict đó,
         # nên EMA khởi tạo từ model.named_parameters() sẽ tự động có EMA weights.
-        target_model_ref = model.module if isinstance(model, torch.nn.DataParallel) else model
+        target_model_ref = _unwrap_model(model)
         ema = ModelEMA(target_model_ref, decay=0.999)
         if resume_path and os.path.isfile(resume_path):
             print("ℹ️  EMA khởi tạo từ checkpoint weights (đã chứa EMA params)")
