@@ -51,11 +51,12 @@ class AsymmetricLossOptimized(nn.Module):
     Tham số mặc định đã được validate trên MS-COCO, Open Images, và các
     bộ dữ liệu y tế có tính chất tương tự (positive rate < 5%).
     """
-    def __init__(self, gamma_neg=4, gamma_pos=0, clip=0.05, disable_torch_grad_focal_loss=True):
+    def __init__(self, gamma_neg=4, gamma_pos=0, clip=0.05, eps=1e-4, disable_torch_grad_focal_loss=True):
         super().__init__()
         self.gamma_neg = gamma_neg
         self.gamma_pos = gamma_pos
         self.clip = clip
+        self.eps = eps
         self.disable_torch_grad_focal_loss = disable_torch_grad_focal_loss
 
     def forward(self, logits, targets):
@@ -68,8 +69,8 @@ class AsymmetricLossOptimized(nn.Module):
             xs_neg = (xs_neg + self.clip).clamp(max=1)
 
         # Basic cross-entropy
-        los_pos = targets * torch.log(xs_pos.clamp(min=1e-8))
-        los_neg = (1 - targets) * torch.log(xs_neg.clamp(min=1e-8))
+        los_pos = targets * torch.log(xs_pos.clamp(min=self.eps))
+        los_neg = (1 - targets) * torch.log(xs_neg.clamp(min=self.eps))
         loss = los_pos + los_neg
 
         # Asymmetric Focusing
@@ -180,7 +181,7 @@ class DiceLoss(nn.Module):
       cao (attention chưa khớp vị trí) so với công thức Dice/Tversky tuyến tính
       thông thường.
     """
-    def __init__(self, smooth=1.0, mask_smooth=0.0, tversky_alpha=0.3, tversky_beta=0.7,
+    def __init__(self, smooth=1e-4, mask_smooth=0.0, tversky_alpha=0.3, tversky_beta=0.7,
                  tversky_weight=0.6, focal_gamma=0.75):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
@@ -260,7 +261,7 @@ class AttentionSparsityLoss(nn.Module):
         l1_loss = attention_map.mean()
 
         # Binary entropy: ép pixel về phân cực (gần 0 hoặc gần 1)
-        eps = 1e-6
+        eps = 1e-4  # An toàn cho FP16
         a = attention_map.clamp(eps, 1 - eps)
         entropy = -(a * torch.log(a) + (1 - a) * torch.log(1 - a))
         entropy_loss = entropy.mean()
