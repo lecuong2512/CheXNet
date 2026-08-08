@@ -38,7 +38,7 @@ def plot_training_progress(train_bce, val_bce, train_dice, val_auroc, save_dir):
         
     # 3. AUROC
     axes[2].plot(epochs, val_auroc, 'm-', label='Validation AUROC', linewidth=2)
-    axes[2].axhline(y=0.75, color='orange', linestyle='--', label='Ngưỡng chuyển Phase')
+    axes[2].axhline(y=0.68, color='orange', linestyle='--', label='Ngưỡng Stage 1→2 (AUROC>0.68)')
     axes[2].set_title('Tiến trình AUROC')
     axes[2].set_xlabel('Epoch')
     axes[2].set_ylabel('Mean AUROC')

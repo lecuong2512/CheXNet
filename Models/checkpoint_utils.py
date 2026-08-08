@@ -22,7 +22,12 @@ def load_checkpoint_safe(path, device=None):
     try:
         import numpy as _np
         from torch import serialization
-        serialization.add_safe_globals([_np._core.multiarray.scalar])
+        # NumPy 2.x dùng _np._core, NumPy 1.x dùng _np.core
+        try:
+            _scalar_cls = _np._core.multiarray.scalar
+        except AttributeError:
+            _scalar_cls = _np.core.multiarray.scalar
+        serialization.add_safe_globals([_scalar_cls])
         return torch.load(path, map_location=device, weights_only=True)
     except Exception:
         return torch.load(path, map_location=device, weights_only=False)

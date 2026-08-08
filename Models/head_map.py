@@ -54,7 +54,8 @@ def generate_endogenous_attention_map(model_path, image_path, model_size='base',
     # Load và tiền xử lý ảnh
     original_image = Image.open(image_path).convert('RGB')
     transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
+        transforms.Resize(int(img_size * 1.14)),
+        transforms.CenterCrop(img_size),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])

@@ -74,15 +74,21 @@ class AsymmetricLossOptimized(nn.Module):
 
         # Asymmetric Focusing
         if self.gamma_neg > 0 or self.gamma_pos > 0:
+            # Dùng torch.no_grad() thay vì set_grad_enabled(False/True) để an toàn
+            # khi có exception — tránh tắt gradient vĩnh viễn cho toàn bộ training.
             if self.disable_torch_grad_focal_loss:
-                torch.set_grad_enabled(False)
-            pt0 = xs_pos * targets
-            pt1 = xs_neg * (1 - targets)
-            pt = pt0 + pt1
-            one_sided_gamma = self.gamma_pos * targets + self.gamma_neg * (1 - targets)
-            one_sided_w = torch.pow(1 - pt, one_sided_gamma)
-            if self.disable_torch_grad_focal_loss:
-                torch.set_grad_enabled(True)
+                with torch.no_grad():
+                    pt0 = xs_pos * targets
+                    pt1 = xs_neg * (1 - targets)
+                    pt = pt0 + pt1
+                    one_sided_gamma = self.gamma_pos * targets + self.gamma_neg * (1 - targets)
+                    one_sided_w = torch.pow(1 - pt, one_sided_gamma)
+            else:
+                pt0 = xs_pos * targets
+                pt1 = xs_neg * (1 - targets)
+                pt = pt0 + pt1
+                one_sided_gamma = self.gamma_pos * targets + self.gamma_neg * (1 - targets)
+                one_sided_w = torch.pow(1 - pt, one_sided_gamma)
             loss *= one_sided_w
 
         return -loss.sum() / logits.shape[0]
@@ -90,10 +96,11 @@ class AsymmetricLossOptimized(nn.Module):
 
 class ModelEMA:
     """
-    Exponential Moving Average of model parameters.
+    Exponential Moving Average of model parameters AND buffers.
 
-    Duy trì bản sao "shadow" của trọng số, cập nhật sau mỗi optimizer step:
-      shadow_param = decay * shadow_param + (1 - decay) * model_param
+    Duy trì bản sao "shadow" của trọng số VÀ buffers (BatchNorm running_mean/var),
+    cập nhật sau mỗi optimizer step:
+      shadow = decay * shadow + (1 - decay) * current
 
     Với decay=0.999, shadow là trung bình có trọng số của ~1000 step gần nhất.
     Giúp làm phẳng dao động SGD → bộ trọng số tổng quát hơn, đặc biệt hiệu quả
@@ -108,28 +115,47 @@ class ModelEMA:
         self.decay = decay
         self.shadow = {}
         self.backup = {}
+        # Track cả parameters (weights) lẫn buffers (BatchNorm running_mean/var)
+        # để tránh mismatch khi apply_shadow swap EMA weights nhưng giữ fast-training BN stats.
         for name, param in model.named_parameters():
             if param.requires_grad:
                 self.shadow[name] = param.data.clone()
+        for name, buf in model.named_buffers():
+            self.shadow[name] = buf.data.clone()
 
     @torch.no_grad()
     def update(self, model):
         for name, param in model.named_parameters():
             if param.requires_grad and name in self.shadow:
                 self.shadow[name].mul_(self.decay).add_(param.data, alpha=1 - self.decay)
+        for name, buf in model.named_buffers():
+            if name in self.shadow:
+                # BatchNorm num_batches_tracked là int64, không thể mul_ với float decay.
+                # Chỉ áp dụng EMA cho float buffers (running_mean/var); copy trực tiếp int buffers.
+                if self.shadow[name].is_floating_point():
+                    self.shadow[name].mul_(self.decay).add_(buf.data, alpha=1 - self.decay)
+                else:
+                    self.shadow[name].copy_(buf.data)
 
     def apply_shadow(self, model):
-        """Swap model weights với EMA weights (dùng trước validation)."""
+        """Swap model weights+buffers với EMA (dùng trước validation)."""
         for name, param in model.named_parameters():
             if param.requires_grad and name in self.shadow:
                 self.backup[name] = param.data.clone()
                 param.data.copy_(self.shadow[name])
+        for name, buf in model.named_buffers():
+            if name in self.shadow:
+                self.backup[name] = buf.data.clone()
+                buf.data.copy_(self.shadow[name])
 
     def restore(self, model):
         """Khôi phục trọng số training gốc (dùng sau validation)."""
         for name, param in model.named_parameters():
             if name in self.backup:
                 param.data.copy_(self.backup[name])
+        for name, buf in model.named_buffers():
+            if name in self.backup:
+                buf.data.copy_(self.backup[name])
         self.backup = {}
 
 
@@ -231,7 +257,11 @@ class AttentionSparsityLoss(nn.Module):
         self.entropy_weight = entropy_weight
 
     def forward(self, attention_map):
-        mean_activation = attention_map.mean()
+        # M3 fix: Tính mean PER-CHANNEL rồi trung bình — tránh ép model
+        # phải kích hoạt attention ở kênh bệnh không tồn tại trong ảnh.
+        # attention_map: [B, 15, H, W] → per_channel_mean: [B, 15]
+        per_channel_mean = attention_map.mean(dim=(2, 3))  # [B, 15]
+        mean_activation = per_channel_mean.mean()  # Trung bình toàn bộ
         # Hai phía: phạt khi mean VƯỢT QUÁ hoặc XUỐNG THẤP HƠN target_density.
         # L1 distance tạo gradient hằng số (không phụ thuộc khoảng cách lệch)
         # -> dễ cân bằng hơn L2 và không bị explode gradient.
@@ -257,12 +287,23 @@ class UncertaintyWeighting(nn.Module):
         # Khởi tạo log(σ²) = 0 → σ² = 1 → trọng số ban đầu = 0.5
         self.log_vars = nn.Parameter(torch.zeros(n_tasks))
     
-    def forward(self, *losses):
+    def forward(self, *losses, active_mask=None):
+        """Tính weighted loss. active_mask: list[bool] — True nếu loss[i] có data thật,
+        False nếu loss[i] = 0 do không có data (vd Dice khi batch không có VinDr).
+        Khi active_mask[i]=False, bỏ qua hoàn toàn loss[i] và KHÔNG update log_vars[i]."""
         total = 0
         weighted_losses = []
+        # Clamp log_vars để chặn trôi vô hạn khi bất kỳ loss component nào → 0.
+        # Khoảng [-4, 4] → precision ∈ [0.018, 54.6] — đủ linh hoạt mà không bùng nổ.
+        clamped_log_vars = torch.clamp(self.log_vars, min=-4.0, max=4.0)
         for i, loss in enumerate(losses):
-            precision = torch.exp(-self.log_vars[i])  # 1/σ²
-            weighted = precision * loss + self.log_vars[i]
+            # Bỏ qua loss không có data — tránh log_vars[i] trôi khi loss luôn = 0
+            if active_mask is not None and not active_mask[i]:
+                weighted_losses.append(0.0)
+                continue
+            precision = torch.exp(-clamped_log_vars[i])  # 1/σ²
+            # Đúng công thức Kendall & Gal 2018: 0.5 * (1/σ²) * L + 0.5 * log(σ²)
+            weighted = 0.5 * precision * loss + 0.5 * clamped_log_vars[i]
             total += weighted
             weighted_losses.append(weighted.item())
         return total, weighted_losses
@@ -360,10 +401,19 @@ class HybridTrainer:
         resume_epoch = 0
         resume_stage = 1
         resume_best_auroc = 0.0
+        resume_ckpt = None  # Lưu checkpoint dict để load optimizer/scheduler/scaler sau
         if resume_path and os.path.isfile(resume_path):
             print(f"\n🔄 Resume từ checkpoint: {resume_path}")
             ckpt = load_checkpoint_safe(resume_path, device)
-            state_dict = extract_state_dict(ckpt)
+            # M2 fix: Ưu tiên 'training_state_dict' (weights gốc) khi resume training.
+            # 'state_dict' chứa EMA weights (quá mượt, phá momentum dynamics).
+            # Backward-compatible: checkpoint cũ chỉ có 'state_dict' → dùng nó.
+            if 'training_state_dict' in ckpt:
+                state_dict = extract_state_dict({'state_dict': ckpt['training_state_dict']})
+                print("ℹ️  Load TRAINING weights (không phải EMA) để resume training")
+            else:
+                state_dict = extract_state_dict(ckpt)
+                print("ℹ️  Checkpoint cũ — dùng state_dict (có thể là EMA weights)")
             target_model = _unwrap_model(model)
             target_model.load_state_dict(state_dict)
             resume_epoch      = ckpt.get('epoch', 0)
@@ -379,6 +429,7 @@ class HybridTrainer:
                   f"best AUROC={resume_best_auroc:.4f})")
             print(f"   Sẽ tiếp tục từ epoch {resume_epoch + 1}, "
                   f"còn tối đa {trMaxEpoch} epoch nữa.")
+            resume_ckpt = ckpt  # Giữ lại để load optimizer/scheduler/scaler sau
         elif resume_path:
             print(f"⚠️  Không tìm thấy checkpoint tại '{resume_path}' — bắt đầu train mới.")
 
@@ -519,6 +570,40 @@ class HybridTrainer:
         print(f"🎯 ASL: gamma_neg={criterion_bce.gamma_neg}, gamma_pos={criterion_bce.gamma_pos}, clip={criterion_bce.clip}")
         print(f"📊 EMA: decay={ema.decay}")
 
+        # ── Khôi phục trạng thái optimizer/scheduler/scaler/uncertainty từ checkpoint ──
+        if resume_ckpt is not None:
+            if 'optimizer_state_dict' in resume_ckpt:
+                try:
+                    optimizer.load_state_dict(resume_ckpt['optimizer_state_dict'])
+                    print("✅ Đã khôi phục Optimizer state (momentum + variance)")
+                except Exception as e:
+                    print(f"⚠️  Không load được optimizer state: {e}")
+            else:
+                print("⚠️  Checkpoint cũ không chứa optimizer state — AdamW khởi tạo lại momentum")
+
+            if 'scaler_state_dict' in resume_ckpt:
+                try:
+                    scaler.load_state_dict(resume_ckpt['scaler_state_dict'])
+                    print("✅ Đã khôi phục GradScaler state")
+                except Exception as e:
+                    print(f"⚠️  Không load được scaler state: {e}")
+
+            if 'scheduler_state_dict' in resume_ckpt:
+                try:
+                    scheduler.load_state_dict(resume_ckpt['scheduler_state_dict'])
+                    print("✅ Đã khôi phục Scheduler state")
+                except Exception as e:
+                    print(f"⚠️  Không load được scheduler state (có thể do thay đổi T_max): {e}")
+
+            if 'uncertainty_weights_state_dict' in resume_ckpt:
+                try:
+                    uncertainty_weights.load_state_dict(resume_ckpt['uncertainty_weights_state_dict'])
+                    print(f"✅ Đã khôi phục UncertaintyWeighting (log_vars={uncertainty_weights.log_vars.data.tolist()})")
+                except Exception as e:
+                    print(f"⚠️  Không load được uncertainty_weights state: {e}")
+
+            del resume_ckpt  # Giải phóng bộ nhớ
+
         # Khởi tạo trạng thái training — dùng giá trị resume nếu có checkpoint
         bestAUROC = resume_best_auroc
         stage = resume_stage
@@ -623,23 +708,33 @@ class HybridTrainer:
                 if _is_main_process():
                     os.makedirs(os.path.dirname(pathModel) or '.', exist_ok=True)
 
-                    # Lưu state_dict đầy đủ: lấy full model state (bao gồm cả
-                    # buffers như BatchNorm running_mean/running_var) rồi ghi đè
-                    # các PARAMETERS bằng trọng số EMA (tổng quát hơn training weights).
-                    # Cách cũ (chỉ lưu ema.shadow) thiếu buffers → lỗi Missing key
-                    # khi load lại cho test/inference.
+                    # M2 fix: Lưu CẢ training weights LẪN EMA weights riêng biệt.
+                    # - 'state_dict': EMA weights (dùng cho inference/test — tổng quát hơn)
+                    # - 'training_state_dict': training weights gốc (dùng khi resume training
+                    #   để bảo toàn momentum dynamics — EMA weights quá "mượt" để train tiếp)
                     ema_model = _unwrap_model(model)
-                    full_state = ema_model.state_dict()  # copy đầy đủ cả params + buffers
-                    for name, ema_param in ema.shadow.items():
-                        if name in full_state:
-                            full_state[name] = ema_param.cpu()
+                    # Deep copy training state: state_dict() trả về references,
+                    # cần clone để tránh bị ảnh hưởng khi tạo ema_state bên dưới.
+                    training_state = {k: v.clone() for k, v in ema_model.state_dict().items()}
+
+                    # Tạo EMA state bằng cách ghi đè params+buffers bằng EMA shadow
+                    ema_state = {k: v.clone() for k, v in training_state.items()}
+                    for name, ema_val in ema.shadow.items():
+                        if name in ema_state:
+                            ema_state[name] = ema_val.cpu()
+
                     torch.save({
                         'epoch': global_epoch,
-                        'state_dict': full_state,
+                        'state_dict': ema_state,           # EMA (cho inference)
+                        'training_state_dict': training_state,  # Training (cho resume)
                         'best_auroc': bestAUROC,
                         'stage': stage,
                         'model_size': model_size,
                         'img_size': img_size,
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'scaler_state_dict': scaler.state_dict(),
+                        'uncertainty_weights_state_dict': uncertainty_weights.state_dict(),
                     }, pathModel)
                     print(f"✅ Model saved (epoch {global_epoch}, AUROC: {bestAUROC:.4f})")
             else:
@@ -698,6 +793,7 @@ class HybridTrainer:
             total_sparsity += sparsity_loss.item()
             
             dice_loss_val = torch.tensor(0.0, device=device)
+            has_valid_dice = False  # Theo dõi: batch này có Dice data thực sự không?
             # Tính Dice Loss cho VinDr - CHỈ trên các kênh THỰC SỰ có GT bbox.
             # Quy tắc xác định kênh hợp lệ: với dữ liệu VinDr-CXR, mỗi nhãn dương
             # (label=1) cho 1 bệnh LUÔN đi kèm bbox tương ứng (đã kiểm chứng trên
@@ -712,13 +808,21 @@ class HybridTrainer:
                 valid_mask = (vin_labels > 0.5)
                 valid_mask[:, no_finding_idx] = False  # No Finding không có bbox
 
+                has_valid_dice = valid_mask.sum() > 0  # Có kênh bệnh thật sự có bbox
                 dice_loss_val = criterion_dice(vin_attention, vin_gt_masks, valid_mask)
-                total_dice += dice_loss_val.item()
-                n_dice_batches += 1
+                # C2 fix: Chỉ đếm batch dice khi CÓ kênh hợp lệ thật sự,
+                # tránh pha loãng avg_dice bằng các batch toàn "No Finding"
+                if has_valid_dice:
+                    total_dice += dice_loss_val.item()
+                    n_dice_batches += 1
 
             # Uncertainty weighting tự động cân bằng 3 loss components
+            # C1 fix: active_mask[1]=False khi batch không có Dice data thật
+            # → log_vars[1] (Dice) không bị update, tránh trôi xuống -4.0
             if uncertainty_weights is not None:
-                loss, _ = uncertainty_weights(bce_loss, dice_loss_val, sparsity_loss)
+                dice_active = has_valid_dice
+                loss, _ = uncertainty_weights(bce_loss, dice_loss_val, sparsity_loss,
+                                              active_mask=[True, dice_active, True])
             else:
                 loss = bce_loss + dice_loss_val * (2.0 if stage == 1 else 1.2) + sparsity_loss * 0.2
 
@@ -731,13 +835,20 @@ class HybridTrainer:
             consistency_loss = (p_no_finding * p_max_disease).mean()
             loss = loss + consistency_loss * 0.1
                 
-            # AMP backward + optimizer step
+            # AMP backward + optimizer step + gradient clipping
             if scaler is not None:
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)  # Chuyển gradient về FP32 scale trước khi clip
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                if uncertainty_weights is not None:
+                    torch.nn.utils.clip_grad_norm_(uncertainty_weights.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                if uncertainty_weights is not None:
+                    torch.nn.utils.clip_grad_norm_(uncertainty_weights.parameters(), max_norm=1.0)
                 optimizer.step()
 
             # EMA update sau mỗi optimizer step
@@ -794,17 +905,21 @@ class HybridTrainer:
                 logits = logits.float()
                 
                 if use_tta:
-                    # TTA: lật ngang ảnh và lấy trung bình logits
+                    # TTA: lật ngang ảnh và lấy trung bình PROBABILITIES (không phải logits)
+                    # vì sigmoid là hàm phi tuyến: sigmoid((a+b)/2) ≠ (sigmoid(a)+sigmoid(b))/2
                     with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                         logits_flip, _ = model(torch.flip(inputs, dims=[3]))
                     logits_flip = logits_flip.float()
-                    logits = (logits + logits_flip) / 2.0
+                    avg_probs = (torch.sigmoid(logits) + torch.sigmoid(logits_flip)) / 2.0
                 
-                loss = criterion_bce(logits, targets.float())
+                loss = criterion_bce(logits, targets.float())  # Val loss tính trên logits gốc
                 
                 total_loss += loss.item()
                 
-                allPreds.append(torch.sigmoid(logits).cpu())
+                if use_tta:
+                    allPreds.append(avg_probs.cpu())
+                else:
+                    allPreds.append(torch.sigmoid(logits).cpu())
                 allTargets.append(targets.float().cpu())
                 
         allPreds = torch.cat(allPreds, dim=0).numpy()

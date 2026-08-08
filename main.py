@@ -239,10 +239,11 @@ def runTest():
             inputs = inputs.to(device)
             with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                 logits, _ = model(inputs)
-                # TTA: lật ngang ảnh và lấy trung bình logits
+                # TTA: lật ngang ảnh và lấy trung bình PROBABILITIES (không phải logits)
+                # vì sigmoid là hàm phi tuyến: sigmoid((a+b)/2) ≠ (sigmoid(a)+sigmoid(b))/2
                 logits_flip, _ = model(torch.flip(inputs, dims=[3]))
-            logits = ((logits.float() + logits_flip.float()) / 2.0)
-            allPreds.append(torch.sigmoid(logits).cpu())
+            avg_probs = (torch.sigmoid(logits.float()) + torch.sigmoid(logits_flip.float())) / 2.0
+            allPreds.append(avg_probs.cpu())
             allTargets.append(targets.cpu())
 
     allPreds   = torch.cat(allPreds,   dim=0).numpy()
@@ -254,10 +255,13 @@ def runTest():
     for i in range(allPreds.shape[1]):
         # Youden's J = sensitivity + specificity - 1 = TPR - FPR
         from sklearn.metrics import roc_curve
-        fpr, tpr, thresholds_roc = roc_curve(allTargets[:, i], allPreds[:, i])
-        j_scores = tpr - fpr
-        best_idx = np.argmax(j_scores)
-        optimal_thresholds.append(thresholds_roc[best_idx])
+        try:
+            fpr, tpr, thresholds_roc = roc_curve(allTargets[:, i], allPreds[:, i])
+            j_scores = tpr - fpr
+            best_idx = np.argmax(j_scores)
+            optimal_thresholds.append(thresholds_roc[best_idx])
+        except Exception:
+            optimal_thresholds.append(0.5)  # Fallback khi class chỉ có 1 giá trị
     optimal_thresholds = np.array(optimal_thresholds)
     
 
@@ -374,6 +378,104 @@ def runTest():
     plt.savefig(cm_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"✓ Confusion Matrix: {cm_path}")
+
+    # =========================================================================
+    # CÁC BIỂU ĐỒ BỔ SUNG (CHI TIẾT)
+    # =========================================================================
+    print("\n⏳ Đang vẽ các biểu đồ đánh giá chuyên sâu...")
+    import seaborn as sns
+    from sklearn.metrics import precision_recall_curve
+    
+    # 1. ROC Curves (per class)
+    plt.figure(figsize=(10, 8))
+    for i, name in enumerate(CLASS_NAMES):
+        try:
+            fpr, tpr, _ = roc_curve(allTargets[:, i], allPreds[:, i])
+            plt.plot(fpr, tpr, lw=1.5, label=f'{name} (AUC = {aurocs[i]:.3f})')
+        except Exception:
+            pass
+    plt.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
+    plt.xlim([0.0, 1.0]); plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate'); plt.ylabel('True Positive Rate')
+    plt.title('ROC Curves per Class')
+    plt.legend(loc="lower right", fontsize=8, ncol=2)
+    roc_path = os.path.join(save_dir, 'test_roc_curves.png')
+    plt.savefig(roc_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✓ ROC Curves: {roc_path}")
+
+    # 2. PR Curves (per class)
+    plt.figure(figsize=(10, 8))
+    for i, name in enumerate(CLASS_NAMES):
+        try:
+            precision, recall, _ = precision_recall_curve(allTargets[:, i], allPreds[:, i])
+            plt.plot(recall, precision, lw=1.5, label=f'{name} (PR-AUC = {pr_aucs[i]:.3f})')
+        except Exception:
+            pass
+    plt.xlim([0.0, 1.0]); plt.ylim([0.0, 1.05])
+    plt.xlabel('Recall'); plt.ylabel('Precision')
+    plt.title('Precision-Recall Curves per Class')
+    plt.legend(loc="upper right", fontsize=8, ncol=2)
+    pr_path = os.path.join(save_dir, 'test_pr_curves.png')
+    plt.savefig(pr_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✓ PR Curves: {pr_path}")
+
+    # 3. Phân phối xác suất (Probability Distribution)
+    plt.figure(figsize=(10, 5))
+    preds_flat = allPreds.flatten()
+    targets_flat = allTargets.flatten()
+    plt.hist(preds_flat[targets_flat == 0], bins=50, alpha=0.5, color='blue', label='Negative (GT=0)', density=True)
+    plt.hist(preds_flat[targets_flat == 1], bins=50, alpha=0.5, color='red', label='Positive (GT=1)', density=True)
+    plt.xlabel('Predicted Probability')
+    plt.ylabel('Density')
+    plt.title('Probability Distribution of Predictions')
+    plt.legend(loc='upper center')
+    prob_path = os.path.join(save_dir, 'test_prob_distribution.png')
+    plt.savefig(prob_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Phân phối xác suất: {prob_path}")
+
+    # 4. Per-class Confusion Matrices (Grid 3x5)
+    num_classes = len(CLASS_NAMES)
+    rows = int(np.ceil(num_classes / 5))
+    cols = min(num_classes, 5)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
+    axes = axes.flatten()
+    for i, name in enumerate(CLASS_NAMES):
+        cm_i = confusion_matrix(allTargets[:, i], allBinary_optimal[:, i])
+        sns.heatmap(cm_i, annot=True, fmt='d', cmap='Blues', ax=axes[i], cbar=False)
+        axes[i].set_title(name, fontsize=10)
+        axes[i].set_xticks([]); axes[i].set_yticks([])
+    # Hide any unused subplots
+    for j in range(i + 1, len(axes)):
+        axes[j].axis('off')
+    plt.tight_layout()
+    per_class_cm_path = os.path.join(save_dir, 'test_per_class_cm.png')
+    plt.savefig(per_class_cm_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Lưới Per-class Confusion Matrix: {per_class_cm_path}")
+
+    # 5. F1-Score vs Threshold (Macro Average)
+    thresholds_test = np.linspace(0.01, 0.99, 50)
+    f1_scores_mean = []
+    for th in thresholds_test:
+        binary_preds = (allPreds >= th).astype(int)
+        f1_mean_th = np.nanmean([f1_score(allTargets[:, c], binary_preds[:, c], zero_division=0) for c in range(num_classes)])
+        f1_scores_mean.append(f1_mean_th)
+    plt.figure(figsize=(8, 5))
+    plt.plot(thresholds_test, f1_scores_mean, color='purple', lw=2)
+    best_th_idx = np.argmax(f1_scores_mean)
+    plt.axvline(thresholds_test[best_th_idx], color='red', linestyle='--', label=f'Best Thresh = {thresholds_test[best_th_idx]:.2f}')
+    plt.xlabel('Threshold')
+    plt.ylabel('Macro-Average F1-Score')
+    plt.title('Macro-Average F1-Score vs Decision Threshold')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    f1_th_path = os.path.join(save_dir, 'test_threshold_f1.png')
+    plt.savefig(f1_th_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✓ F1-Score vs Threshold: {f1_th_path}")
     print(f"\n✅ Hoàn tất. Kết quả lưu tại: {save_dir}/")
 
 

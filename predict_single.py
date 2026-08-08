@@ -229,8 +229,9 @@ def main():
         print("├──────────────────────┬──────────────────┤")
         print("│ Nhãn                 │ Xác suất         │")
         print("├──────────────────────┼──────────────────┤")
-        for name, prob in zip(CLASS_NAMES, probs):
-            marker = " ◀ POSITIVE" if prob >= threshold else ""
+        for idx, (name, prob) in enumerate(zip(CLASS_NAMES, probs)):
+            thr = optimal_thresholds[idx] if optimal_thresholds is not None else threshold
+            marker = " ◀ POSITIVE" if prob >= thr else ""
             print(f"│ {name:<20} │ {prob:.4f}{marker:<10}│")
         print("└──────────────────────┴──────────────────┘")
         print(f"\n✅ Kết quả dương tính: {positives if positives else ['No Finding']}")
@@ -240,7 +241,7 @@ def main():
         save_path = os.path.join('Results', f'{base_name}_predict.png')
         visualize(probs, positives, att_maps, original_np,
                   image_path, save_path=save_path, threshold=threshold,
-                  img_size=img_size)
+                  img_size=img_size, optimal_thresholds=optimal_thresholds)
         print()
 
 
