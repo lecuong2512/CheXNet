@@ -3,6 +3,10 @@ import os
 import sys
 import torch
 
+# Vô hiệu hóa thanh tiến trình của Hugging Face Hub để tránh spam log
+# (vì môi trường như Colab không hỗ trợ đè dòng \r, gây ra hiện tượng nhảy dòng liên tục)
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
 # =========================================================================
 # Thêm thư mục Models vào sys.path để import đúng trên Colab
 # =========================================================================
