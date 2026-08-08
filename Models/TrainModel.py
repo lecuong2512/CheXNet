@@ -597,8 +597,30 @@ class HybridTrainer:
 
             if 'scheduler_state_dict' in resume_ckpt:
                 try:
-                    scheduler.load_state_dict(resume_ckpt['scheduler_state_dict'])
-                    print("✅ Đã khôi phục Scheduler state")
+                    # Kiểm tra tương thích: scheduler state từ checkpoint phải khớp
+                    # số param groups hiện tại. Nếu optimizer đổi cấu trúc (vd thêm
+                    # discriminative LR → 3 groups thay vì 2), scheduler cũ sẽ crash
+                    # tại step() vì zip(param_groups, lr_values) lệch kích thước.
+                    saved_sched = resume_ckpt['scheduler_state_dict']
+                    n_optimizer_groups = len(optimizer.param_groups)
+                    # SequentialLR lưu base_lrs trong sub-schedulers, không trực tiếp
+                    # Kiểm tra qua _last_lr hoặc base_lrs của scheduler con
+                    sched_compatible = True
+                    if hasattr(scheduler, '_schedulers'):
+                        # SequentialLR: kiểm tra sub-scheduler đầu tiên
+                        for sub_sched_state in saved_sched.get('_schedulers', []):
+                            if 'base_lrs' in sub_sched_state and len(sub_sched_state['base_lrs']) != n_optimizer_groups:
+                                sched_compatible = False
+                                break
+                    elif 'base_lrs' in saved_sched and len(saved_sched['base_lrs']) != n_optimizer_groups:
+                        sched_compatible = False
+
+                    if sched_compatible:
+                        scheduler.load_state_dict(saved_sched)
+                        print("✅ Đã khôi phục Scheduler state")
+                    else:
+                        print(f"⚠️  Scheduler checkpoint không tương thích (checkpoint: {len(saved_sched.get('base_lrs', []))} groups, "
+                              f"hiện tại: {n_optimizer_groups} groups) — tạo scheduler mới")
                 except Exception as e:
                     print(f"⚠️  Không load được scheduler state (có thể do thay đổi T_max): {e}")
 
