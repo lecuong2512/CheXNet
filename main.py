@@ -14,6 +14,14 @@ if not sys.stderr.isatty():
         def isatty(self):
             return True
     sys.stderr = DummyTTY(sys.stderr)
+    
+    # Ép tất cả các thanh tiến trình (kể cả tải song song của HF) ghi đè lên cùng 1 dòng
+    try:
+        from tqdm import tqdm
+        from functools import partialmethod
+        tqdm.__init__ = partialmethod(tqdm.__init__, position=0)
+    except ImportError:
+        pass
 
 # Đảm bảo bật lại thanh tiến trình nếu trước đó đã tắt
 if "HF_HUB_DISABLE_PROGRESS_BARS" in os.environ:
