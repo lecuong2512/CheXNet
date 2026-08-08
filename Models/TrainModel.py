@@ -631,7 +631,10 @@ class HybridTrainer:
                 except Exception as e:
                     print(f"⚠️  Không load được uncertainty_weights state: {e}")
 
+            stage1_dice_met_ever = resume_ckpt.get('stage1_dice_met_ever', False)
             del resume_ckpt  # Giải phóng bộ nhớ
+        else:
+            stage1_dice_met_ever = False
 
         # Khởi tạo trạng thái training — dùng giá trị resume nếu có checkpoint
         bestAUROC = resume_best_auroc
@@ -716,6 +719,11 @@ class HybridTrainer:
                 # ở mức có ý nghĩa (không chỉ đúng mật độ trung bình).
                 stage1_threshold_met = (diceLoss < 0.65) and (valAUROC > 0.68)
                 if stage1_threshold_met:
+                    if not stage1_dice_met_ever:
+                        print(f"🎉 Lần đầu đạt chuẩn Dice! Lấy model này làm chuẩn mới (reset bestAUROC từ {bestAUROC:.4f} xuống {valAUROC:.4f})")
+                        bestAUROC = valAUROC - 1.0  # Ép lưu model và update bestAUROC mới
+                        stage1_dice_met_ever = True
+                        
                     stage1_streak += 1
                     print(f"  ✓ Stage 1 threshold met ({stage1_streak}/2): Dice={diceLoss:.4f}<0.65, AUROC={valAUROC:.4f}>0.68")
                 else:
@@ -740,6 +748,7 @@ class HybridTrainer:
             if valAUROC > bestAUROC:
                 bestAUROC = valAUROC
                 epochs_no_improve = 0
+                
                 # DDP: chỉ rank 0 lưu checkpoint (tránh race condition ghi file)
                 if _is_main_process():
                     os.makedirs(os.path.dirname(pathModel) or '.', exist_ok=True)
@@ -765,6 +774,7 @@ class HybridTrainer:
                         'training_state_dict': training_state,  # Training (cho resume)
                         'best_auroc': bestAUROC,
                         'stage': stage,
+                        'stage1_dice_met_ever': stage1_dice_met_ever,
                         'model_size': model_size,
                         'img_size': img_size,
                         'optimizer_state_dict': optimizer.state_dict(),
