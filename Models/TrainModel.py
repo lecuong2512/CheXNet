@@ -171,16 +171,16 @@ class DiceLoss(nn.Module):
     THỰC SỰ có ground-truth bbox cho ảnh đó - bỏ qua hoàn toàn các kênh không
     có annotation (không tính cả "đúng" lẫn "sai" trên kênh đó).
 
-    - mask_smooth: làm mềm GT mask (0/1 -> eps/1-eps) để gradient không biến mất
-      khi attention khớp gần hoàn hảo với bbox. Giá trị nhỏ (0.02) để không đè
-      sàn loss lên quá cao khi mask rất thưa (nền chiếm >95% diện tích).
+    - mask_smooth=0.0: KHÔNG làm mềm GT mask. Giá trị cũ (0.02) đã vô tình
+      biến pixel nền (0→0.02) tạo ra "nền giả" chiếm >90% diện tích, khiến
+      Dice/Tversky score bị kẹt ở mức rất thấp (~0.08) dù attention đã đúng.
     - tversky_beta > alpha: phạt nặng hơn False Negative (bỏ sót vùng tổn thương)
       so với False Positive, vì mục tiêu là hỗ trợ bác sĩ không bỏ sót tổn thương.
     - focal_gamma: mũ hóa (1 - Tversky) để tạo gradient DỐC HƠN ở vùng loss còn
       cao (attention chưa khớp vị trí) so với công thức Dice/Tversky tuyến tính
       thông thường.
     """
-    def __init__(self, smooth=1.0, mask_smooth=0.02, tversky_alpha=0.3, tversky_beta=0.7,
+    def __init__(self, smooth=1.0, mask_smooth=0.0, tversky_alpha=0.3, tversky_beta=0.7,
                  tversky_weight=0.6, focal_gamma=0.75):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
@@ -189,6 +189,7 @@ class DiceLoss(nn.Module):
         self.tversky_beta = tversky_beta    # phạt False Negative (ưu tiên cao hơn)
         self.tversky_weight = tversky_weight
         self.focal_gamma = focal_gamma
+        self.last_raw_dice = 0.0  # Lưu raw Dice score (trước khi kết hợp Tversky) để logging
 
     def forward(self, preds, targets, valid_mask):
         """
@@ -199,9 +200,9 @@ class DiceLoss(nn.Module):
         # Nội suy mask gốc cho bằng kích thước attention map
         targets = F.interpolate(targets, size=preds.shape[2:], mode='bilinear', align_corners=False)
 
-        # Label smoothing cho mask: tránh GT cứng 0/1 khiến Dice/Tversky bão hòa về
-        # một giá trị cố định khi attention học vẹt theo hình bbox
-        targets = targets * (1 - 2 * self.mask_smooth) + self.mask_smooth
+        # Label smoothing cho mask (mặc định 0.0 = không smooth)
+        if self.mask_smooth > 0:
+            targets = targets * (1 - 2 * self.mask_smooth) + self.mask_smooth
 
         # Chỉ giữ lại các kênh THỰC SỰ có GT (valid_mask=True), gom về dạng phẳng
         # theo từng (sample, class) hợp lệ rồi mới flatten không gian - đảm bảo
@@ -209,6 +210,7 @@ class DiceLoss(nn.Module):
         # không tính sai).
         valid_mask = valid_mask.bool()
         if valid_mask.sum() == 0:
+            self.last_raw_dice = 0.0
             return preds.sum() * 0.0  # không có kênh hợp lệ nào -> loss = 0 nhưng vẫn giữ graph
 
         preds_valid = preds[valid_mask]      # [n_valid, H, W]
@@ -219,6 +221,7 @@ class DiceLoss(nn.Module):
 
         intersection = (preds_flat * targets_flat).sum()
         dice = (2. * intersection + self.smooth) / (preds_flat.sum() + targets_flat.sum() + self.smooth)
+        self.last_raw_dice = dice.item()  # Lưu raw Dice score để epoch loop in ra
         dice_loss = 1 - dice
 
         # Focal Tversky: TP, FP, FN tính trên giá trị liên tục (soft), sau đó mũ hóa
@@ -238,41 +241,31 @@ class AttentionSparsityLoss(nn.Module):
     nhằm chặn đường "trốn" của attention map mà Dice/Tversky loss không thấy được.
 
     Gồm 2 thành phần:
-    1. L1 density (HAI PHÍA): phạt khi mean attention lệch khỏi target_density theo
-       cả hai hướng (quá cao LẪN quá thấp). Thiết kế hai phía giải quyết "vicious
-       cycle" của bản cũ (một phía, chỉ phạt khi quá cao): khi mean đã xuống dưới
-       target, gradient entropy tiếp tục kéo xuống thêm mà không có gì kéo ngược
-       lại, dẫn đến mean attention trôi xuống ~0.10 và attention không còn đủ tín
-       hiệu để học vị trí tổn thương. Hai phía tạo điểm cân bằng ổn định tại
-       target_density (mặc định 0.15, phù hợp diện tích tổn thương thực tế trên
-       X-quang ngực, thấp hơn 0.25 cũ vốn quá cao so với annotation VinDr-CXR).
-    2. Binary entropy (nhẹ hơn): ép giá trị về gần 0 hoặc 1 (viền biên rõ) để
-       bản đồ attention dễ đọc khi hỗ trợ bác sĩ quan sát. Entropy_weight nhỏ hơn
-       để không lấn át density loss và không tạo vicious cycle bổ sung.
+    1. L1 regularization: phạt mean activation — ép attention map thưa thớt
+       (vùng nền → 0). Khác biệt so với bản cũ (target_density=0.15 hai chiều):
+       bản cũ ép trung bình toàn bộ 15 kênh đạt 0.15, buộc model phải "bịa"
+       activation ở 13-14 kênh không có bệnh (hallucination). Bản mới chỉ
+       phạt L1 thuần (ép về 0), cho phép attention tự do kích hoạt ở bất kỳ
+       mức nào miễn là có tín hiệu Dice/BCE hỗ trợ.
+    2. Binary entropy: ép giá trị về gần 0 hoặc 1 (viền biên rõ) để
+       bản đồ attention dễ đọc khi hỗ trợ bác sĩ quan sát.
     """
-    def __init__(self, target_density=0.15, density_weight=1.0, entropy_weight=0.05):
+    def __init__(self, l1_weight=0.1, entropy_weight=0.05):
         super(AttentionSparsityLoss, self).__init__()
-        self.target_density = target_density
-        self.density_weight = density_weight
+        self.l1_weight = l1_weight
         self.entropy_weight = entropy_weight
 
     def forward(self, attention_map):
-        # M3 fix: Tính mean PER-CHANNEL rồi trung bình — tránh ép model
-        # phải kích hoạt attention ở kênh bệnh không tồn tại trong ảnh.
-        # attention_map: [B, 15, H, W] → per_channel_mean: [B, 15]
-        per_channel_mean = attention_map.mean(dim=(2, 3))  # [B, 15]
-        mean_activation = per_channel_mean.mean()  # Trung bình toàn bộ
-        # Hai phía: phạt khi mean VƯỢT QUÁ hoặc XUỐNG THẤP HƠN target_density.
-        # L1 distance tạo gradient hằng số (không phụ thuộc khoảng cách lệch)
-        # -> dễ cân bằng hơn L2 và không bị explode gradient.
-        density_loss = torch.abs(mean_activation - self.target_density)
+        # L1: phạt mean activation → ép các vùng không có tổn thương về 0
+        l1_loss = attention_map.mean()
 
+        # Binary entropy: ép pixel về phân cực (gần 0 hoặc gần 1)
         eps = 1e-6
         a = attention_map.clamp(eps, 1 - eps)
         entropy = -(a * torch.log(a) + (1 - a) * torch.log(1 - a))
         entropy_loss = entropy.mean()
 
-        return self.density_weight * density_loss + self.entropy_weight * entropy_loss
+        return self.l1_weight * l1_loss + self.entropy_weight * entropy_loss
 
 class UncertaintyWeighting(nn.Module):
     """Kendall & Gal 2018 — Uncertainty-based automatic multi-task loss weighting.
@@ -519,7 +512,21 @@ class HybridTrainer:
         )
 
         # ---- Optimizers & Loss
-        optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
+        # Discriminative LR: head mới (attention_head, fpn_lateral, fpn_merge)
+        # khởi tạo ngẫu nhiên → cần LR cao hơn (5e-4) để bắt kịp backbone đã pretrained.
+        # Backbone (ConvNeXtV2, SwinV2) giữ LR thấp (1e-4) để không phá pretrained features.
+        raw_model = _unwrap_model(model)
+        head_params_ids = set(
+            id(p) for p in list(raw_model.attention_head.parameters())
+            + list(raw_model.fpn_lateral.parameters())
+            + list(raw_model.fpn_merge.parameters())
+        )
+        backbone_params = [p for p in model.parameters() if id(p) not in head_params_ids]
+        head_params = [p for p in model.parameters() if id(p) in head_params_ids]
+        optimizer = optim.AdamW([
+            {'params': backbone_params, 'lr': 1e-4},
+            {'params': head_params, 'lr': 5e-4},
+        ], weight_decay=0.05)
 
         # ASL thay thế BCE: giảm trọng số các ca âm tính dễ, tập trung vào
         # ca dương tính và ca khó → đặc biệt hiệu quả khi positive rate < 5%
@@ -641,7 +648,7 @@ class HybridTrainer:
 
             # Train
             no_finding_idx = HybridTrainer.CLASS_NAMES.index('No Finding')
-            trainLoss, bceLoss, diceLoss, sparsityLoss = HybridTrainer.epochTrain(
+            trainLoss, bceLoss, diceLoss, sparsityLoss, rawDice = HybridTrainer.epochTrain(
                 model, current_loader, optimizer, criterion_bce, criterion_dice, criterion_sparsity, device, stage,
                 no_finding_idx=no_finding_idx, scaler=scaler, amp_dtype=amp_dtype, ema=ema, uncertainty_weights=uncertainty_weights
             )
@@ -655,7 +662,14 @@ class HybridTrainer:
             )
             ema.restore(target_model_ref)
 
-            print(f"\nTrain - Total Loss: {trainLoss:.4f} | ASL: {bceLoss:.4f} | Dice: {diceLoss:.6f} | Sparsity: {sparsityLoss:.4f}")
+            # In log_vars + precision để theo dõi UncertaintyWeighting phân bổ trọng số ra sao
+            if uncertainty_weights is not None:
+                log_vars = uncertainty_weights.log_vars.data.tolist()
+                precisions = [float(torch.exp(-v).item()) for v in uncertainty_weights.log_vars.data]
+                print(f"\n🔧 UncertaintyWeighting log_vars: ASL={log_vars[0]:.3f}, Dice={log_vars[1]:.3f}, Sparsity={log_vars[2]:.3f}")
+                print(f"   Precision (1/σ²):             ASL={precisions[0]:.3f}, Dice={precisions[1]:.3f}, Sparsity={precisions[2]:.3f}")
+
+            print(f"\nTrain - Total Loss (weighted): {trainLoss:.4f} | ASL: {bceLoss:.4f} | Dice Loss: {diceLoss:.6f} | Raw Dice Score: {rawDice:.4f} | Sparsity: {sparsityLoss:.4f}")
             print(f"Val   - Total Loss: {valLoss:.4f}   | AUROC: {valAUROC:.4f} | Acc: {valAcc:.4f}")
 
             scheduler.step()
@@ -675,7 +689,7 @@ class HybridTrainer:
                 # đầu stage 1 (đo mô hình không bị overfit trên VinDr) + phải ổn định
                 # liên tiếp 2 epoch để tránh chuyển do dao động ngẫu nhiên.
                 #
-                # Ngưỡng Dice 0.60: đã kiểm chứng thực nghiệm, khi Dice < 0.60 với Focal
+                # Ngưỡng Dice 0.65: đã kiểm chứng thực nghiệm, khi Dice < 0.65 với Focal
                 # Tversky (gamma=0.75), attention map đã định vị đúng không gian tổn thương
                 # ở mức có ý nghĩa (không chỉ đúng mật độ trung bình).
                 stage1_threshold_met = (diceLoss < 0.65) and (valAUROC > 0.68)
@@ -754,6 +768,7 @@ class HybridTrainer:
                    no_finding_idx=0, scaler=None, amp_dtype=torch.float32, ema=None, uncertainty_weights=None):
         model.train()
         total_loss, total_bce, total_dice, total_sparsity = 0.0, 0.0, 0.0, 0.0
+        total_raw_dice = 0.0  # Tổng raw Dice score (không phải loss) để theo dõi overlap thực tế
         n_dice_batches = 0
         attn_mean_sum, attn_std_sum = 0.0, 0.0
         
@@ -802,10 +817,14 @@ class HybridTrainer:
             # hợp lệ <=> targets[:, k] == 1 VÀ k != index của 'No Finding'.
             if vin_mask.sum() > 0:
                 vin_attention = attention_maps[vin_mask]      # [N_vin, 15, H, W]
-                vin_gt_masks = masks[vin_mask].float()        # [N_vin, 15, H_orig, W_orig]
-                vin_labels = targets[vin_mask]                # [N_vin, 15]
+                vin_gt_masks = masks[vin_mask].float()        # [N_vin, 15, H, W]
 
-                valid_mask = (vin_labels > 0.5)
+                # Tính valid_mask dựa trên mask thực tế SAU augmentation, thay vì
+                # label gốc. RandomResizedCrop/Affine/Rotation có thể đẩy bbox nhỏ
+                # ra ngoài khung hình → mask rỗng hoàn toàn dù label vẫn = 1.
+                # Nếu vẫn dùng label gốc, model bị phạt "không tìm thấy tổn thương"
+                # ở kênh mà bbox đã bị cắt mất → gradient mâu thuẫn, kẹt Dice.
+                valid_mask = (vin_gt_masks.sum(dim=(2, 3)) > 0)  # [N_vin, 15]
                 valid_mask[:, no_finding_idx] = False  # No Finding không có bbox
 
                 has_valid_dice = valid_mask.sum() > 0  # Có kênh bệnh thật sự có bbox
@@ -814,6 +833,7 @@ class HybridTrainer:
                 # tránh pha loãng avg_dice bằng các batch toàn "No Finding"
                 if has_valid_dice:
                     total_dice += dice_loss_val.item()
+                    total_raw_dice += criterion_dice.last_raw_dice
                     n_dice_batches += 1
 
             # Uncertainty weighting tự động cân bằng 3 loss components
@@ -876,7 +896,8 @@ class HybridTrainer:
                   f"Mô hình có thể đang tô gần như đồng nhất, không phản ánh đúng vùng tổn thương.")
 
         avg_dice = total_dice / n_dice_batches if n_dice_batches > 0 else 0.0
-        return total_loss / n_batches, total_bce / n_batches, avg_dice, avg_sparsity
+        avg_raw_dice = total_raw_dice / n_dice_batches if n_dice_batches > 0 else 0.0
+        return total_loss / n_batches, total_bce / n_batches, avg_dice, avg_sparsity, avg_raw_dice
 
     @staticmethod
     def epochVal(model, dataLoader, criterion_bce, device, amp_dtype=torch.float32, use_tta=False):
