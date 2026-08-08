@@ -541,7 +541,7 @@ class HybridTrainer:
         # QUAN TRỌNG: phải add_param_group TRƯỚC khi tạo scheduler, vì scheduler
         # ghi nhận số param groups lúc khởi tạo. Nếu add sau → scheduler chỉ
         # tạo LR cho 1 group nhưng optimizer có 2 → crash khi scheduler.step().
-        uncertainty_weights = UncertaintyWeighting(n_tasks=3).to(device)
+        uncertainty_weights = UncertaintyWeighting(n_tasks=2).to(device)  # Chỉ ASL + Dice (Sparsity là regularizer, không phải task)
         optimizer.add_param_group({'params': uncertainty_weights.parameters(), 'lr': 1e-3})
 
         # Scheduler: warmup chỉ áp dụng khi bắt đầu stage 1 từ đầu.
@@ -626,7 +626,17 @@ class HybridTrainer:
 
             if 'uncertainty_weights_state_dict' in resume_ckpt:
                 try:
-                    uncertainty_weights.load_state_dict(resume_ckpt['uncertainty_weights_state_dict'])
+                    saved_uw = resume_ckpt['uncertainty_weights_state_dict']
+                    # Xử lý migration: checkpoint cũ có 3 log_vars (ASL, Dice, Sparsity)
+                    # nhưng model mới chỉ cần 2 (ASL, Dice). Lấy 2 giá trị đầu.
+                    saved_log_vars = saved_uw.get('log_vars', None)
+                    current_n = uncertainty_weights.log_vars.data.shape[0]
+                    if saved_log_vars is not None and saved_log_vars.shape[0] != current_n:
+                        print(f"⚠️  UncertaintyWeighting checkpoint có {saved_log_vars.shape[0]} tasks, "
+                              f"model hiện tại cần {current_n} — lấy {current_n} giá trị đầu")
+                        uncertainty_weights.log_vars.data = saved_log_vars[:current_n].clone()
+                    else:
+                        uncertainty_weights.load_state_dict(saved_uw)
                     print(f"✅ Đã khôi phục UncertaintyWeighting (log_vars={uncertainty_weights.log_vars.data.tolist()})")
                 except Exception as e:
                     print(f"⚠️  Không load được uncertainty_weights state: {e}")
@@ -691,8 +701,11 @@ class HybridTrainer:
             if uncertainty_weights is not None:
                 log_vars = uncertainty_weights.log_vars.data.tolist()
                 precisions = [float(torch.exp(-v).item()) for v in uncertainty_weights.log_vars.data]
-                print(f"\n🔧 UncertaintyWeighting log_vars: ASL={log_vars[0]:.3f}, Dice={log_vars[1]:.3f}, Sparsity={log_vars[2]:.3f}")
-                print(f"   Precision (1/σ²):             ASL={precisions[0]:.3f}, Dice={precisions[1]:.3f}, Sparsity={precisions[2]:.3f}")
+                # UW chỉ cân bằng 2 task: ASL + Dice. Sparsity là regularizer riêng.
+                print(f"\n🔧 UncertaintyWeighting log_vars: ASL={log_vars[0]:.3f}, Dice={log_vars[1]:.3f}")
+                print(f"   Precision (1/σ²):             ASL={precisions[0]:.3f}, Dice={precisions[1]:.3f}")
+                sparsity_w = 0.1 if stage == 1 else 0.05
+                print(f"   Sparsity weight (cố định):    {sparsity_w}")
 
             print(f"\nTrain - Total Loss (weighted): {trainLoss:.4f} | ASL: {bceLoss:.4f} | Dice Loss: {diceLoss:.6f} | Raw Dice Score: {rawDice:.4f} | Sparsity: {sparsityLoss:.4f}")
             print(f"Val   - Total Loss: {valLoss:.4f}   | AUROC: {valAUROC:.4f} | Acc: {valAcc:.4f}")
@@ -868,15 +881,24 @@ class HybridTrainer:
                     total_raw_dice += criterion_dice.last_raw_dice
                     n_dice_batches += 1
 
-            # Uncertainty weighting tự động cân bằng 3 loss components
-            # C1 fix: active_mask[1]=False khi batch không có Dice data thật
-            # → log_vars[1] (Dice) không bị update, tránh trôi xuống -4.0
+            # Uncertainty weighting CHỈ cân bằng 2 task losses (ASL + Dice).
+            # Sparsity là regularizer (không phải task loss), được cộng riêng
+            # với trọng số cố định. Lý do: nếu nhét Sparsity vào UW, mạng
+            # sẽ "hack" bằng cách tắt Attention (Sparsity→0) rồi đẩy Precision
+            # lên vô cực → Total Loss âm vô cực → Attention collapse hoàn toàn.
+            #
+            # Trọng số Sparsity cố định:
+            # - Stage 1 (warm-up attention): 0.1 — phạt nhẹ, ưu tiên Dice học bbox
+            # - Stage 2 (toàn bộ dữ liệu):  0.05 — phạt rất nhẹ, ưu tiên ASL phân loại
+            sparsity_weight = 0.1 if stage == 1 else 0.05
+            
             if uncertainty_weights is not None:
                 dice_active = has_valid_dice
-                loss, _ = uncertainty_weights(bce_loss, dice_loss_val, sparsity_loss,
-                                              active_mask=[True, dice_active, True])
+                loss, _ = uncertainty_weights(bce_loss, dice_loss_val,
+                                              active_mask=[True, dice_active])
+                loss = loss + sparsity_weight * sparsity_loss
             else:
-                loss = bce_loss + dice_loss_val * (2.0 if stage == 1 else 1.2) + sparsity_loss * 0.2
+                loss = bce_loss + dice_loss_val * (2.0 if stage == 1 else 1.2) + sparsity_loss * sparsity_weight
 
             # No Finding consistency: phạt khi P(No Finding) cao + max(P(bệnh)) cũng cao
             probs_all = torch.sigmoid(logits)
