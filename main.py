@@ -3,9 +3,21 @@ import os
 import sys
 import torch
 
-# Vô hiệu hóa thanh tiến trình của Hugging Face Hub để tránh spam log
-# (vì môi trường như Colab không hỗ trợ đè dòng \r, gây ra hiện tượng nhảy dòng liên tục)
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+# Fix lỗi thanh tiến trình tqdm bị nhảy nhiều dòng trong Colab khi chạy bằng !python
+# Bằng cách giả lập môi trường terminal (TTY), tqdm sẽ dùng \r để đè dòng thay vì \n
+if not sys.stderr.isatty():
+    class DummyTTY(object):
+        def __init__(self, stream):
+            self.stream = stream
+        def __getattr__(self, attr):
+            return getattr(self.stream, attr)
+        def isatty(self):
+            return True
+    sys.stderr = DummyTTY(sys.stderr)
+
+# Đảm bảo bật lại thanh tiến trình nếu trước đó đã tắt
+if "HF_HUB_DISABLE_PROGRESS_BARS" in os.environ:
+    del os.environ["HF_HUB_DISABLE_PROGRESS_BARS"]
 
 # =========================================================================
 # Thêm thư mục Models vào sys.path để import đúng trên Colab
