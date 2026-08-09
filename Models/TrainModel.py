@@ -585,7 +585,48 @@ class HybridTrainer:
                     optimizer.load_state_dict(resume_ckpt['optimizer_state_dict'])
                     print("✅ Đã khôi phục Optimizer state (momentum + variance)")
                 except Exception as e:
-                    print(f"⚠️  Không load được optimizer state: {e}")
+                    # Thường xảy ra khi số param groups thay đổi (vd: thêm UW group).
+                    # Giải pháp: load thủ công state cho các group cũ, giữ group mới fresh.
+                    saved_opt = resume_ckpt['optimizer_state_dict']
+                    saved_groups = saved_opt.get('param_groups', [])
+                    current_groups = optimizer.param_groups
+                    n_saved = len(saved_groups)
+                    n_current = len(current_groups)
+                    
+                    if n_saved < n_current and n_saved > 0:
+                        print(f"⚠️  Optimizer checkpoint có {n_saved} groups, hiện tại có {n_current} groups")
+                        print(f"   → Load thủ công {n_saved} groups đầu (backbone+head), group mới khởi tạo fresh")
+                        
+                        # Copy state (momentum, variance) cho các param tương ứng
+                        saved_state = saved_opt.get('state', {})
+                        # Map: param index trong checkpoint → state
+                        # Optimizer state key = param index (int)
+                        for param_idx, state_val in saved_state.items():
+                            idx = int(param_idx)
+                            # Chỉ load state cho params thuộc các group cũ
+                            total_old_params = sum(len(g['params']) for g in saved_groups)
+                            if idx < total_old_params:
+                                # Tìm param tương ứng trong optimizer hiện tại
+                                current_params_flat = []
+                                for g in current_groups[:n_saved]:
+                                    current_params_flat.extend(g['params'])
+                                if idx < len(current_params_flat):
+                                    p = current_params_flat[idx]
+                                    # Copy state tensors sang device đúng
+                                    optimizer.state[p] = {
+                                        k: v.to(p.device) if isinstance(v, torch.Tensor) else v
+                                        for k, v in state_val.items()
+                                    }
+                        
+                        # Copy hyperparams (lr, betas, weight_decay...) cho groups cũ
+                        for i in range(n_saved):
+                            for key in ['lr', 'betas', 'eps', 'weight_decay', 'amsgrad']:
+                                if key in saved_groups[i]:
+                                    current_groups[i][key] = saved_groups[i][key]
+                        
+                        print(f"   ✅ Đã khôi phục momentum+variance cho {n_saved} groups cũ")
+                    else:
+                        print(f"⚠️  Không load được optimizer state: {e}")
             else:
                 print("⚠️  Checkpoint cũ không chứa optimizer state — AdamW khởi tạo lại momentum")
 
