@@ -315,7 +315,8 @@ class HybridTrainer:
               model_size: str, img_size: int, trBatchSize: int, trMaxEpoch: int,
               pathModel: str = 'Trainedmodel/hybrid_model.pth',
               preload_images: bool = False, num_workers_preload: int = 8,
-              resume_path: str = None, use_torch_compile: bool = False):
+              resume_path: str = None, use_torch_compile: bool = False,
+              num_workers_train: int = 12):
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"\nDevice: {device}")
@@ -448,18 +449,26 @@ class HybridTrainer:
                 img = self.transform(img)
                 return torch.cat([img, mask], dim=0)
 
-        color_augs = []
-        if resume_stage == 2:
-            color_augs = [
-                ImageOnlyTransform(transforms.ColorJitter(brightness=0.15, contrast=0.15)),
-                ImageOnlyTransform(transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))),
-            ]
-        transformTrain = transforms.Compose([
+        # Tạo SẴN cả 2 bộ transform cho Stage 1 và Stage 2.
+        # Stage 1: chỉ geometric (crop, flip, rotate, affine)
+        # Stage 2: geometric + color augmentation (ColorJitter, GaussianBlur)
+        # BUG FIX: Trước đây color_augs chỉ bật khi resume_stage==2 (cố định),
+        # khiến Stage 2 khi train từ đầu (Mode 1) không bao giờ có color augmentation.
+        _base_geometric = [
             transforms.RandomResizedCrop(img_size, scale=(0.75, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation(15),
             transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-        ] + color_augs)
+        ]
+        _color_augs = [
+            ImageOnlyTransform(transforms.ColorJitter(brightness=0.15, contrast=0.15)),
+            ImageOnlyTransform(transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))),
+        ]
+        transformTrain_stage1 = transforms.Compose(_base_geometric)
+        transformTrain_stage2 = transforms.Compose(_base_geometric + _color_augs)
+
+        # Chọn transform khởi đầu dựa trên stage hiện tại
+        transformTrain = transformTrain_stage2 if resume_stage == 2 else transformTrain_stage1
         
         transformVal = transforms.Compose([
             transforms.Resize(int(img_size * 1.14)),
@@ -480,8 +489,7 @@ class HybridTrainer:
         vin_indices_train = [i for i, s in enumerate(datasetTrain.sources) if s == VINDR_SOURCE_NAME]
         vin_subset_train = torch.utils.data.Subset(datasetTrain, vin_indices_train)
         
-        num_workers = min(12, os.cpu_count() or 4)
-        
+        num_workers = num_workers_train        
         # DDP: dùng DistributedSampler để chia data giữa các GPU
         ddp_sampler_stage1 = None
         ddp_sampler_val = None
@@ -755,13 +763,14 @@ class HybridTrainer:
                     # Đổi sang patience thấp hơn cho stage 2 (mỗi epoch ~1.5h)
                     early_stop_patience = patience_stage2
                     epochs_no_improve = 0  # reset để stage 2 có đủ patience
-                    # Reset sang CosineAnnealingLR thuần cho stage 2
-                    # (không cần warmup lại vì model đã ổn định sau stage 1)
-                    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer,
-                        T_max=max(1, trMaxEpoch - epoch),
-                        eta_min=1e-6
-                    )
+                    # BUG FIX: Bật Color Augmentation cho Stage 2.
+                    # Dataset.__getitem__ đọc self.transform mỗi lần, gán lại giữa
+                    # chừng có hiệu lực ngay từ batch tiếp theo.
+                    datasetTrain.transform = transformTrain_stage2
+                    print("   ✅ Đã bật Color Augmentation (ColorJitter + GaussianBlur) cho Stage 2")
+                    # BUG FIX: KHÔNG tạo mới scheduler. Giữ nguyên scheduler cũ để
+                    # LR tiếp tục giảm theo đúng lịch trình Cosine, tránh nhảy lại
+                    # lên đỉnh gây overfit.
 
             # Save Model & Early Stopping
             if valAUROC > bestAUROC:

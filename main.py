@@ -149,7 +149,14 @@ def runTrain(resume: bool = False):
     # ── G. Số epoch
     trMaxEpoch = int(input("\nSố Epoch tối đa cho lần chạy này [50]: ").strip() or "50")
 
-    # ── H. torch.compile (công tắc cứng)
+    # ── H. Số lượng tiến trình tải ảnh
+    print("\n⚙️ Cấu hình luồng tải dữ liệu:")
+    print("  Trên Windows, num_workers cao có thể gây lỗi 1455 (hết bộ nhớ ảo/pagefile).")
+    print("  Nếu bị lỗi 1455, hãy giảm xuống 2 hoặc 4.")
+    nw_input = input("  Số luồng đọc ảnh (num_workers) [12]: ").strip()
+    num_workers_train = int(nw_input) if nw_input else 12
+
+    # ── I. torch.compile (công tắc cứng)
     print("\n⚡ torch.compile:")
     print("  Tăng tốc 10-20% nhưng có thể gây lỗi khi dùng multi-GPU.")
     use_compile_input = input("  Bật torch.compile? [y/n, mặc định n]: ").strip().lower()
@@ -175,6 +182,7 @@ def runTrain(resume: bool = False):
         num_workers_preload=num_workers_preload,
         resume_path=resume_path,
         use_torch_compile=use_torch_compile,
+        num_workers_train=num_workers_train,
     )
 
 
@@ -240,7 +248,7 @@ def runTest():
     ])
     datasetTest   = DatasetGenerator(pathDirData, pathFileTest, transformTest)
     dataLoaderTest = FastDataLoader.create_dataloader(
-        datasetTest, batch_size=16, shuffle=False, num_workers=4
+        datasetTest, batch_size=8, shuffle=False, num_workers=4
     )
 
     # ── Inference với TTA (Test-Time Augmentation)
@@ -249,11 +257,18 @@ def runTest():
     print("\n🔍 Đang chạy inference + TTA...")
     allPreds, allTargets = [], []
     
-    # Detect AMP dtype
+    # Detect AMP dtype (Sửa lỗi "GET was unable to find an engine" và lỗi NaN trên GPU đời cũ)
+    # Nguyên nhân 1: Test bằng float16 trên T4 bị tràn số -> NaN.
+    # Nguyên nhân 2: Test bằng bfloat16 trên T4 bị lỗi cuDNN không hỗ trợ ConvNeXt.
+    # Khắc phục: Ép về float32 toàn bộ khi test trên máy yếu (compute_cap < 8.0) để an toàn 100%.
     use_amp = device.type == 'cuda'
     if use_amp:
         compute_cap = torch.cuda.get_device_capability(0)
-        amp_dtype = torch.bfloat16 if compute_cap >= (8, 0) else torch.float16
+        if compute_cap >= (8, 0):
+            amp_dtype = torch.bfloat16
+        else:
+            use_amp = False
+            amp_dtype = torch.float32
     else:
         amp_dtype = torch.float32
     
