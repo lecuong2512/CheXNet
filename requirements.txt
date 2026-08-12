@@ -16,11 +16,3 @@ opencv-python>=4.8.0
 
 # Data handling
 pandas>=2.0.0
-
-# Optional: For faster data loading
-# pyarrow>=13.0.0
-# turbojpeg>=1.0.0
-
-# Optional: For better profiling
-# tensorboard>=2.14.0
-# nvitop>=1.3.0  # GPU monitoring

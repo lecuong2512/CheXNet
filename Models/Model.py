@@ -8,7 +8,7 @@ class HybridCNNViTModel(nn.Module):
     """
     Hybrid ConvNeXtV2 + SwinV2 for Multi-label Classification with Residual Masking
     """
-    def __init__(self, num_classes=15, model_size='base', img_size=384, dropout_rate=0.3):
+    def __init__(self, num_classes=15, model_size='base', img_size=384, dropout_rate=0.3, pretrained=False):
         super(HybridCNNViTModel, self).__init__()
         
         # Chọn cấu hình cặp Backbone
@@ -35,7 +35,7 @@ class HybridCNNViTModel(nn.Module):
             cnn_dim, swin_dim = 1024, 1024
 
         # 1. Local Feature Extractor (CNN)
-        self.cnn = timm.create_model(cnn_name, pretrained=True, features_only=True)
+        self.cnn = timm.create_model(cnn_name, pretrained=pretrained, features_only=True)
         
         # FPN for multi-scale attention map
         cnn_feature_info = self.cnn.feature_info
@@ -53,7 +53,7 @@ class HybridCNNViTModel(nn.Module):
         self.channel_proj = nn.Conv2d(cnn_dim, swin_dim, kernel_size=1) if cnn_dim != swin_dim else nn.Identity()
 
         # 2. Global Context (ViT - Lấy stage cuối của SwinV2)
-        swin_full = timm.create_model(swin_name, pretrained=True, num_classes=0, global_pool='')
+        swin_full = timm.create_model(swin_name, pretrained=pretrained, num_classes=0, global_pool='')
         self.vit_blocks = swin_full.layers[-1] 
         if hasattr(self.vit_blocks, 'downsample') and self.vit_blocks.downsample is not None:
             self.vit_blocks.downsample = nn.Identity()

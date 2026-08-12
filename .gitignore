@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Heavy model files / checkpoints
+*.pth
+*.pt
+*.ckpt
+Trainedmodel/*.pth
+
+# Excluded folders requested by user
+Finetune/
+finetune/
+Frontend/
+Backend/
+
+# Frontend dependencies and builds
+node_modules/
+dist/
+.vite/
+
+# IDE / System files
+.vscode/
+.idea/
+.DS_Store

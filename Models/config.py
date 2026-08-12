@@ -13,8 +13,12 @@ class TensorCoreConfig:
         """
         if not torch.cuda.is_available():
             return {
+                'model_size': model_size,
+                'image_size': image_size,
                 'batch_size': 2,
                 'gpu_name': 'CPU',
+                'total_memory_gb': 0.0,
+                'compute_capability': 'N/A',
                 'has_tensor_cores': False,
                 'use_amp': False,
                 'amp_dtype': torch.float32,
