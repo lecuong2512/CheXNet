@@ -11,8 +11,6 @@ __pycache__/
 Trainedmodel/*.pth
 
 # Excluded folders requested by user
-Finetune/
-finetune/
 Frontend/
 Backend/
 
