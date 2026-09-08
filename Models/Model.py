@@ -8,7 +8,16 @@ class HybridCNNViTModel(nn.Module):
     """
     Hybrid ConvNeXtV2 + SwinV2 for Multi-label Classification with Residual Masking
     """
-    def __init__(self, num_classes=15, model_size='base', img_size=384, dropout_rate=0.3, pretrained=False):
+    def __init__(self, num_classes=15, model_size='base', img_size=384, dropout_rate=0.3, pretrained=True):
+        """
+        pretrained: True khi TRAIN (cần tải ImageNet weights làm điểm khởi tạo).
+                    False khi INFERENCE/BACKEND — chỉ cần đúng "khung" kiến trúc,
+                    toàn bộ trọng số thật sẽ được nạp đè bằng checkpoint đã fine-tune
+                    ngay sau đó. Trước đây tham số này không tồn tại nên backend
+                    (main.py) gọi HybridCNNViTModel(..., pretrained=False) sẽ ném
+                    TypeError ngay khi khởi tạo -> model không bao giờ load được,
+                    mọi request /predict chỉ nhận lỗi "Mô hình chưa được tải".
+        """
         super(HybridCNNViTModel, self).__init__()
         
         # Chọn cấu hình cặp Backbone
@@ -111,7 +120,18 @@ class HybridCNNViTModel(nn.Module):
             elif hasattr(self.vit_blocks, 'grad_checkpointing'):
                 self.vit_blocks.grad_checkpointing = True
 
-    def forward(self, x):
+    def forward(self, x, return_embedding=False):
+        """
+        return_embedding=False (mặc định): trả về (logits, attention_map) — GIỮ NGUYÊN
+            hành vi cũ để không phá TrainModel.py / predict_single.py / head_map.py,
+            tất cả đang unpack đúng 2 giá trị.
+        return_embedding=True: trả thêm (logits, attention_map, pooled) — `pooled`
+            là vector đặc trưng sau Global Average Pooling (trước classifier), dùng
+            làm embedding cho CBIR (cbir.py). Trước đây main.py/cbir.py gọi
+            model(x, return_embedding=True) nhưng forward() cũ không có tham số
+            này -> TypeError, khiến /predict luôn lỗi và index CBIR không bao giờ
+            build được (build_index bắt lỗi rồi âm thầm nhét vector 0 giả vào index).
+        """
         # 1. Trích xuất đặc trưng cục bộ
         cnn_all = self.cnn(x)
         cnn_features_low = cnn_all[-2]
@@ -174,4 +194,22 @@ class HybridCNNViTModel(nn.Module):
         pooled = F.adaptive_avg_pool2d(masked_features, (1, 1)).flatten(1)
         logits = self.classifier(pooled)
 
+        if return_embedding:
+            return logits, attention_map, pooled
         return logits, attention_map
+
+    def set_grad_checkpointing(self, enable=True):
+        """Bật / tắt gradient checkpointing cho CNN và ViT blocks."""
+        if hasattr(self.cnn, 'set_grad_checkpointing'):
+            try:
+                self.cnn.set_grad_checkpointing(enable)
+            except Exception:
+                pass
+        for m in self.vit_blocks.modules():
+            if hasattr(m, 'grad_checkpointing'):
+                m.grad_checkpointing = enable
+            if hasattr(m, 'set_grad_checkpointing'):
+                try:
+                    m.set_grad_checkpointing(enable)
+                except Exception:
+                    pass

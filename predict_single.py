@@ -1,6 +1,14 @@
 # predict_single.py
 # Dự đoán và visualize attention map cho một ảnh X-quang bất kỳ
 import os, sys
+
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import torch
 import numpy as np
 import cv2
@@ -28,20 +36,53 @@ CLASS_NAMES = [
 MAX_DISEASES_SHOWN = 6  # Giới hạn số bệnh hiển thị heatmap
 
 # ═════════════════════════════════════════════════════════════════════════════
-def load_model(model_path: str, model_size: str = 'base', img_size: int = 384):
-    """Load model từ checkpoint, tự xử lý DataParallel prefix."""
+def load_model(model_path: str, model_size: str = None, img_size: int = None):
+    """Load model từ checkpoint, tự xử lý DataParallel prefix và auto-detect model_size/img_size."""
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isabs(model_path):
+        candidate = os.path.join(project_root, model_path)
+        if os.path.exists(candidate):
+            model_path = candidate
+        elif model_path.startswith("CheXNet\\") or model_path.startswith("CheXNet/"):
+            candidate2 = os.path.join(os.path.dirname(project_root), model_path)
+            if os.path.exists(candidate2):
+                model_path = candidate2
+
+    import gc
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    ckpt = load_checkpoint_safe(model_path, device)
+    # FIX VRAM: Load checkpoint về CPU trước, tránh nhân đôi VRAM trên GPU (giảm từ 3.7GB -> ~1.1GB)
+    ckpt = load_checkpoint_safe(model_path, device=torch.device('cpu'))
     state_dict = extract_state_dict(ckpt)
 
-    model = HybridCNNViTModel(num_classes=15, model_size=model_size, img_size=img_size)
-    model.load_state_dict(state_dict)
-    model.to(device).eval()
+    ckpt_model_size = ckpt.get('model_size', 'large') if isinstance(ckpt, dict) else 'large'
+    ckpt_img_size = ckpt.get('img_size', 384) if isinstance(ckpt, dict) else 384
+
+    if model_size is None or model_size == 'base':
+        model_size = ckpt_model_size
+    if img_size is None:
+        img_size = ckpt_img_size
+
+    # Khởi tạo model và nạp weights trên CPU
+    model = HybridCNNViTModel(num_classes=15, model_size=model_size, img_size=img_size, pretrained=False)
+    model.load_state_dict(state_dict, strict=False)
 
     best_auroc = ckpt.get('best_auroc', 'N/A')
     trained_epoch = ckpt.get('epoch', 'N/A')
-    print(f"✅ Loaded model | epoch={trained_epoch} | best_auroc={best_auroc}")
+
+    # Giải phóng checkpoint và state_dict khỏi bộ nhớ RAM/GPU
+    del ckpt, state_dict
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Chuyển model lên GPU sau khi đã giải phóng
+    model = model.to(device).eval()
+    if hasattr(model, 'set_grad_checkpointing'):
+        model.set_grad_checkpointing(False)
+
+    vram_allocated = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
+    print(f"✅ Loaded model ({model_size.upper()}, {img_size}px) | epoch={trained_epoch} | best_auroc={best_auroc} (VRAM: {vram_allocated:.2f} GB)")
     return model, device
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,8 +106,10 @@ def predict(model, device, image_path: str, img_size: int = 384,
     original_image = Image.open(image_path).convert('RGB')
     input_tensor = transform(original_image).unsqueeze(0).to(device)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         logits, attention_map = model(input_tensor)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     probs = torch.sigmoid(logits)[0].cpu().numpy()
     # Dùng per-class threshold nếu có, không thì dùng threshold cố định
@@ -185,16 +228,17 @@ def main():
     print("  Dự đoán đơn ảnh X-quang – Hybrid CNN-ViT")
     print("="*60)
 
-    model_path = input("\nĐường dẫn model (.pth) [Trainedmodel/hybrid_model.pth]: ").strip() \
-                 or 'Trainedmodel/hybrid_model.pth'
-    model_size = input("Model size (base/large) [base]: ").strip() or 'base'
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    default_model = os.path.join(project_root, 'Trainedmodel', 'hybrid_model.pth')
+    model_path = input(f"\nĐường dẫn model (.pth) [{default_model}]: ").strip() or default_model
+    model_size = input("Model size (base/large) [large]: ").strip() or 'large'
     img_size   = int(input("Image size (256/384) [384]: ").strip() or '384')
     threshold  = float(input("Threshold dự đoán (0-1) [0.5]: ").strip() or '0.5')
 
     model, device = load_model(model_path, model_size, img_size)
 
     # Load optimal thresholds nếu có
-    thresholds_file = os.path.join('Results', 'optimal_thresholds.npy')
+    thresholds_file = os.path.join(project_root, 'Results', 'optimal_thresholds.npy')
     optimal_thresholds = None
     if os.path.isfile(thresholds_file):
         optimal_thresholds = np.load(thresholds_file)
@@ -209,6 +253,8 @@ def main():
         if image_path.lower() in ('q', 'quit', 'exit'):
             print("Thoát.")
             break
+        if not os.path.isabs(image_path) and os.path.isfile(os.path.join(project_root, image_path)):
+            image_path = os.path.join(project_root, image_path)
         if not os.path.isfile(image_path):
             print(f"❌ Không tìm thấy file: {image_path}")
             continue
@@ -236,9 +282,11 @@ def main():
         print("└──────────────────────┴──────────────────┘")
         print(f"\n✅ Kết quả dương tính: {positives if positives else ['No Finding']}")
 
-        # Lưu ảnh visualize
+        # Lưu ảnh visualize vào Results/EX
         base_name = os.path.splitext(os.path.basename(image_path))[0]
-        save_path = os.path.join('Results', f'{base_name}_predict.png')
+        save_dir = os.path.join(project_root, 'Results', 'EX')
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f'{base_name}_predict.png')
         visualize(probs, positives, att_maps, original_np,
                   image_path, save_path=save_path, threshold=threshold,
                   img_size=img_size, optimal_thresholds=optimal_thresholds)
