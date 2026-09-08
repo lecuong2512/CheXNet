@@ -74,51 +74,19 @@ Sơ đồ thể hiện luồng xử lý toàn diện từ lúc nhận ảnh X-qu
 
 ```mermaid
 flowchart TB
-    IN["Ảnh X-Quang Ngực Thẳng<br/>(DICOM / PNG / JPEG)"]
-    
-    subgraph INFERENCE["XỬ LÝ ĐA MÔ HÌNH TRÊN GPU (~1.21 GB VRAM)"]
-        CHEX["CheXNet Hybrid<br/>(ConvNeXtV2 + SwinV2)"]
-        YOLO["YOLO11m Detector<br/>(C3k2 + SPPF + C2PSA)"]
-        OTSU["Phân Vùng Phổi Cổ Điển<br/>(CLAHE + Otsu)"]
-    end
+    IN["Ảnh X-Quang Ngực Thẳng (DICOM / PNG / JPEG)"] --> PRE["Tiền Xử Lý & Chuẩn Hóa Đa Kích Thước (384px & 1024px)"]
 
-    subgraph FUSION["HỢP NHẤT SUY LUẬN"]
-        CASCADE["Cascade 2-Stage Filter<br/>Score = P_cls × Conf_YOLO"]
-        DISPLAY["Display Fusion Engine<br/>Heatmap ⊂ Bounding Box"]
-    end
+    PRE --> CHEX["Nhánh 1: CheXNet Classifier (384×384)<br/>ConvNeXtV2 + SwinV2 ➜ 15 P_cls & Attention Maps"]
+    PRE --> YOLO["Nhánh 2: YOLO11m Detector (1024×1024)<br/>C3k2 + PAFPN ➜ Tọa độ Bounding Boxes & Conf_YOLO"]
+    PRE --> OTSU["Nhánh 3: Phân Vùng Phổi Cổ Điển<br/>CLAHE + Otsu ➜ 6 Phân khu giải phẫu lồng ngực"]
 
-    subgraph CLINICAL["TRÍ TUỆ LÂM SÀNG"]
-        COOC["Ma Trận Đồng Xuất Hiện 15×15<br/>(Hội chứng kết hợp)"]
-        CBIR["FAISS Vector Search (1536d)<br/>(Tra cứu ca tương tự)"]
-        GEMINI["Google Gemini 2.5 Flash<br/>(Báo cáo y khoa tự động)"]
-    end
+    CHEX --> FUSION["Bộ Hợp Nhất Đa Mô Hình<br/>• Cascade 2-Stage Filter: Triệt tiêu >90% False Positives<br/>• Display Fusion: Bản đồ nhiệt Heatmap giới hạn trong BBox"]
+    YOLO --> FUSION
 
-    subgraph SERVING["GIAO DIỆN & PHỤC VỤ"]
-        API["FastAPI Server (Port 8000)"]
-        UI["React 18 Dashboard (Port 5173)"]
-    end
+    FUSION --> CLINICAL["Khối Trí Tuệ Lâm Sàng Hỗ Trợ Chẩn Đoán<br/>• Ma trận tương quan 15×15: Phát hiện hội chứng kết hợp (CHF, Viêm đông đặc)<br/>• Meta FAISS: Tìm kiếm ca bệnh tương tự dựa trên Vector 1536d<br/>• Google Gemini 2.5 Flash: Phân tích cơ chế bệnh & Sinh báo cáo y khoa"]
+    OTSU --> CLINICAL
 
-    IN --> CHEX
-    IN --> YOLO
-    IN --> OTSU
-
-    CHEX -->|Xác suất P_cls| CASCADE
-    YOLO -->|Độ tin cậy BBox| CASCADE
-
-    CHEX -->|Attention Heatmap| DISPLAY
-    YOLO -->|Tọa độ BBox| DISPLAY
-
-    CASCADE --> COOC
-    OTSU --> COOC
-    CHEX -.->|Vector 1536d| CBIR
-    CASCADE --> GEMINI
-    COOC --> GEMINI
-
-    CASCADE --> API
-    DISPLAY --> API
-    CBIR --> API
-    GEMINI --> API
-    API --> UI
+    CLINICAL --> WEB["Giao Diện Web Bác Sĩ (FastAPI + React 18 Dashboard)<br/>Viewer ảnh kép đồng bộ, Lớp phủ BBox tương tác & Báo cáo chuẩn Bộ Y tế"]
 ```
 
 ---
@@ -129,70 +97,77 @@ Mô hình phân loại cốt lõi kết hợp sức mạnh bổ trợ lẫn nhau
 
 ```mermaid
 flowchart TB
-    IMG["Ảnh X-Quang Đầu Vào<br/>[B, 3, 384, 384]"] --> CNN["ConvNeXtV2-Large Backbone<br/>(Trích xuất đặc trưng cục bộ)"]
+    IMG["Ảnh X-Quang Đầu Vào: [B, 3, 384, 384]"] --> CNN["Backbone ConvNeXtV2-Large<br/>Trích xuất đặc trưng đa tầng Stage-3 & Stage-4"]
 
-    CNN --> S3["Stage-3 Features<br/>[B, 1536, 24, 24]"]
-    CNN --> S4["Stage-4 Features<br/>[B, 1536, 12, 12]"]
+    CNN --> SWIN["SwinV2 Transformer Stage<br/>Khai thác ngữ cảnh toàn cục (SW-MSA) trên Stage-4"]
 
-    S4 --> SWIN["SwinV2-Large Stage<br/>Shifted Window Self-Attention (SW-MSA)<br/>[B, 1536, 12, 12]"]
+    SWIN --> FPN["Khối FPN Multi-Scale Decoder<br/>Hòa trộn đặc trưng SwinV2 (Upsample 2×) và CNN Stage-3 (Lateral 1×1)"]
 
-    SWIN --> UP["Bilinear Upsample (2×)<br/>[B, 1536, 24, 24]"]
-    S3 --> LAT["Lateral Conv 1×1<br/>[B, 1536, 24, 24]"]
+    FPN --> ATT["15-Channel Spatial Attention Head<br/>Sinh 15 bản đồ nhiệt phân giải cao độc lập cho 15 bệnh lý: M ∈ [B, 15, 24, 24]"]
 
-    UP & LAT --> FPN["FPN Merge Conv 3×3 + BN + GELU<br/>[B, 1536, 24, 24]"]
+    ATT --> GATING["Per-Class Residual Channel Gating<br/>Định hướng 15 nhóm kênh theo vùng chú ý: F'_k = F_k + α · (F_k ⊙ M_k)"]
 
-    FPN --> ATT["15-Channel Attention Head<br/>Conv 3×3 ➜ Conv 1×1 ➜ Sigmoid<br/>15 Bản đồ nhiệt M ∈ [B, 15, 24, 24]"]
+    GATING --> GAP["Global Average Pooling (GAP)<br/>Trích xuất đặc trưng toàn cục cấp ảnh"]
 
-    ATT --> INTERP["Nội suy về kích thước Coarse<br/>M_coarse ∈ [B, 15, 12, 12]"]
-
-    S4 & INTERP --> GATING["Per-Class Residual Channel Gating<br/>F'_k = F_k + α · (F_k ⊙ M_k) với α ≤ 0.8<br/>[B, 1536, 12, 12]"]
-
-    GATING --> GAP["Global Average Pooling (GAP)"]
-
-    GAP --> EMBED["Vector Nhúng: [B, 1536]<br/>(Dùng cho CBIR FAISS)"]
-    GAP --> CLS["Linear Classifier + Sigmoid<br/>15 Xác suất bệnh P_cls ∈ [0, 1]^15"]
+    GAP --> OUT_EMB["Vector Nhúng: [B, 1536]<br/>(Chuẩn hóa L2 cho CBIR FAISS)"]
+    GAP --> OUT_CLS["Linear Classifier + Sigmoid<br/>15 Xác suất bệnh P_cls ∈ [0, 1]^15"]
 ```
 
 #### A. Nhánh Trích Xuất Cục Bộ — ConvNeXtV2-Large
 - **Vai trò**: Chuyên trách phát hiện các tín hiệu tổn thương dạng hình thái và kết cấu vi mô (Local Textures) như nốt mờ nhỏ, viền xơ hóa, mức khí - dịch màng phổi.
 - **Cấu trúc khối**:
-  - Tích chập sâu $7\times 7$ Depthwise Convolution bắt trường tiếp nhận rộng.
+  - Tích chập sâu 7×7 Depthwise Convolution bắt trường tiếp nhận rộng.
   - Chuẩn hóa theo kênh ngược (Inverted Bottleneck ratio 4:1) kết hợp LayerNorm.
   - **Global Response Normalization (GRN)**: Tăng cường độ tương phản giữa các kênh đặc trưng, chống triệt tiêu tín hiệu qua nhiều lớp sâu.
 - **Kích thước đặc trưng trích xuất**:
-  - Stage-3: $\mathbf{F}_{\text{CNN}}^{\text{stage3}} \in \mathbb{R}^{B \times 1536 \times 24 \times 24}$
-  - Stage-4: $\mathbf{F}_{\text{CNN}}^{\text{stage4}} \in \mathbb{R}^{B \times 1536 \times 12 \times 12}$
+  - Stage-3: `F_CNN_stage3 ∈ R^[B × 1536 × 24 × 24]`
+  - Stage-4: `F_CNN_stage4 ∈ R^[B × 1536 × 12 × 12]`
 
 #### B. Nhánh Khai Thác Ngữ Cảnh Toàn Cục — SwinV2-Large
 - **Vai trò**: Nắm bắt mối tương quan không gian tầm xa (Long-range Dependencies), tính đối xứng giải phẫu giữa hai phế trường và tương quan giữa kích thước bóng tim với vòm hoành.
 - **Cơ chế**:
-  - Cửa sổ tự chú ý dịch chuyển (Shifted Window Self-Attention - SW-MSA) với kích thước cửa sổ $12 \times 12 \rightarrow 24 \times 24$.
+  - Cửa sổ tự chú ý dịch chuyển (Shifted Window Self-Attention - SW-MSA) với kích thước cửa sổ 12×12 → 24×24.
   - Post-LayerNorm và **Cosine Attention** giúp ổn định gradient khi truyền ngược ở quy mô tham số lớn (Large scale).
 - **Kích thước đặc trưng đầu ra**:
-  - $\mathbf{F}_{\text{ViT}} \in \mathbb{R}^{B \times 1536 \times 12 \times 12}$
+  - `F_ViT ∈ R^[B × 1536 × 12 × 12]`
 
 #### C. Khối Hòa Trộn Đa Tỷ Lệ (FPN Decoder)
 Để tạo ra bản đồ nhiệt phân giải cao phục vụ khoanh vùng tổn thương, hệ thống hòa trộn đặc trưng ngữ cảnh từ ViT với đặc trưng không gian phân giải cao từ CNN Stage-3:
-$$\mathbf{F}_{\text{FPN}} = \text{GELU}\left(\text{BatchNorm}\left(\text{Conv}_{3\times 3}\left(\text{Upsample}_{2\times}(\mathbf{F}_{\text{ViT}}) + \text{Conv}_{1\times 1}(\mathbf{F}_{\text{CNN}}^{\text{stage3}})\right)\right)\right) \in \mathbb{R}^{B \times 256 \times 24 \times 24}$$
+
+```text
+F_FPN = GELU(BatchNorm(Conv3x3(Upsample2x(F_ViT) + Conv1x1(F_CNN_stage3)))) ∈ R^[B × 256 × 24 × 24]
+```
 
 #### D. Đầu Tạo Bản Đồ Chú Ý 15 Kênh Độc Lập (15-Channel Attention Head)
 Thay vì sử dụng chung 1 bản đồ nhiệt duy nhất cho mọi bệnh, hệ thống áp dụng Segmentation Head riêng biệt để sinh ra **15 bản đồ nhiệt độc lập** cho 15 bệnh lý:
-$$\mathbf{M} = \sigma\left(\text{Conv}_{1\times 1}\left(\text{GELU}(\text{BatchNorm}(\text{Conv}_{3\times 3}(\mathbf{F}_{\text{FPN}})))\right)\right) \in [0, 1]^{B \times 15 \times 24 \times 24}$$
-Mỗi kênh $k \in \{0, \dots, 14\}$ đại diện cho vùng chú ý chuyên biệt của bệnh lý thứ $k$ (ví dụ: kênh *Cardiomegaly* chỉ khoanh vùng diện tích tim, kênh *Effusion* khoanh vùng góc sườn hoành).
+
+```text
+M = Sigmoid(Conv1x1(GELU(BatchNorm(Conv3x3(F_FPN))))) ∈ [0, 1]^[B × 15 × 24 × 24]
+```
+
+Mỗi kênh `k ∈ {0, ..., 14}` đại diện cho vùng chú ý chuyên biệt của bệnh lý thứ `k` (ví dụ: kênh *Cardiomegaly* chỉ khoanh vùng diện tích tim, kênh *Effusion* khoanh vùng góc sườn hoành).
 
 #### E. Cơ Chế Gated Residual Attention Theo Nhóm Kênh (Per-Class Channel Gating)
-Để luồng thông tin không gian từ bản đồ chú ý trực tiếp tái định hướng bộ phân loại, vector kênh của CNN Stage-4 ($1536$ kênh) được chia thành 15 nhóm tương ứng với 15 kênh chú ý:
-$$\mathbf{F}'_k = \mathbf{F}_k + \alpha \cdot (\mathbf{F}_k \odot \mathbf{M}_k), \quad k \in \{0, \dots, 14\}$$
+Để luồng thông tin không gian từ bản đồ chú ý trực tiếp tái định hướng bộ phân loại, vector kênh của CNN Stage-4 (1536 kênh) được chia thành 15 nhóm tương ứng với 15 kênh chú ý:
+
+```text
+F'_k = F_k + α · (F_k ⊙ M_k),   với k ∈ {0, ..., 14}
+```
+
 Trong đó:
-- $\mathbf{F}_k$ là nhóm kênh đặc trưng thứ $k$ (14 nhóm đầu gồm 102 kênh, nhóm cuối gồm 108 kênh).
-- $\mathbf{M}_k \in \mathbb{R}^{B \times 1 \times 12 \times 12}$ là bản đồ chú ý thứ $k$ sau khi nội suy song tuyến tính về kích thước Stage-4.
-- $\alpha = \sigma(\theta_{\text{gate}}) \times \alpha_{\max} \in [0, 0.8]$ là hệ số cổng thích nghi học được. Giới hạn trần $\alpha_{\max} = 0.8$ triệt tiêu hoàn toàn nguy cơ sụp đổ bản đồ chú ý (Attention Collapse), buộc bộ phân loại phải tập trung đúng thực thể tổn thương.
+- `F_k` là nhóm kênh đặc trưng thứ `k` (14 nhóm đầu gồm 102 kênh, nhóm cuối gồm 108 kênh).
+- `M_k` là bản đồ chú ý thứ `k` sau khi nội suy song tuyến tính về kích thước Stage-4 `[B, 1, 12, 12]`.
+- `α = Sigmoid(θ_gate) × α_max ∈ [0, 0.8]` là hệ số cổng thích nghi học được. Giới hạn trần `α_max = 0.8` triệt tiêu hoàn toàn nguy cơ sụp đổ bản đồ chú ý (Attention Collapse), buộc bộ phân loại phải tập trung đúng thực thể tổn thương.
 
 #### F. Đầu Phân Loại & Vector Nhúng (Classification & Embedding)
 Đặc trưng sau cổng gating được gộp qua tầng gộp trung bình toàn cục (GAP):
-$$\mathbf{z}_{\text{emb}} = \text{GAP}(\mathbf{F}') \in \mathbb{R}^{B \times 1536}$$
-- $\mathbf{z}_{\text{emb}}$ được chuẩn hóa $\ell_2$ để làm vector biểu diễn ảnh cho module truy vấn ca tương tự (CBIR).
-- Vector phân loại: $\mathbf{y}_{\text{logits}} = \mathbf{W}_{\text{cls}} \mathbf{z}_{\text{emb}} + \mathbf{b} \in \mathbb{R}^{B \times 15} \implies P_{\text{cls}} = \sigma(\mathbf{y}_{\text{logits}})$.
+
+```text
+z_emb = GAP(F') ∈ R^[B × 1536]
+y_logits = W_cls · z_emb + b ∈ R^[B × 15]   ==>   P_cls = Sigmoid(y_logits)
+```
+
+- `z_emb` được chuẩn hóa L2 để làm vector biểu diễn ảnh cho module truy vấn ca tương tự (CBIR).
 
 ---
 
@@ -219,14 +194,14 @@ flowchart TB
 
     FILTER --> OUT_BOX["Kết Quả Định Vị Tổn Thương<br/>• Tọa độ Bounding Box [x1, y1, x2, y2]<br/>• Nhãn bệnh & Độ tin cậy Conf_YOLO"]
 ```
-- **Kích thước đầu vào**: $1024 \times 1024$ pixels, bảo toàn tối đa vi cấu trúc nốt mờ ($\le 3\text{mm}$) và dải màng phổi mỏng.
-- **Quy mô tham số**: $20.1 \times 10^6$ tham số (20.1M), cân bằng hoàn hảo giữa tốc độ suy luận thời gian thực và khả năng định vị tổn thương nhỏ.
+- **Kích thước đầu vào**: 1024 × 1024 pixels, bảo toàn tối đa vi cấu trúc nốt mờ (≤ 3mm) và dải màng phổi mỏng.
+- **Quy mô tham số**: 20.1M tham số (20.1 × 10⁶), cân bằng hoàn hảo giữa tốc độ suy luận thời gian thực và khả năng định vị tổn thương nhỏ.
 - **Kiến trúc khối cải tiến**:
   - **C3k2 Module**: Khối tích chập phân tán tối ưu hóa luồng gradient sâu.
   - **C2PSA (Cross Stage Partial with Pointwise Spatial Attention)**: Bổ sung cơ chế tự chú ý điểm ảnh trong cổ mạng (Neck), giúp khoanh chính xác viền bờ tổn thương mờ nhạt.
   - **SPPF (Spatial Pyramid Pooling - Fast)**: Tích hợp ngữ cảnh đa thang đo với độ trễ tối thiểu.
   - **Decoupled Head**: Tách riêng hoàn toàn nhánh tính hồi quy tọa độ hộp giới hạn (DFL + CIoU Loss) và nhánh phân loại nhãn.
-- **Đồng bộ nhãn**: 14 lớp bệnh lý giải phẫu đồng bộ hoàn toàn $1-1$ với CheXNet (trừ *No Finding*).
+- **Đồng bộ nhãn**: 14 lớp bệnh lý giải phẫu đồng bộ hoàn toàn 1:1 với CheXNet (trừ *No Finding*).
 
 ---
 
@@ -287,25 +262,29 @@ Một vấn đề lớn trong các hệ thống CADx truyền thống là sự x
 ### 5. Khối Trí Tuệ Lâm Sàng & Phân Tích Chuyên Sâu
 
 #### A. Phân Vùng Phổi Giải Phẫu (Classical Lung Segmentation)
-- **Phương pháp**: Sử dụng thuật toán xử lý ảnh hình thái học thuần túy (không phụ thuộc trọng số nặng, tốc độ xử lý $< 15\text{ms}$):
-  1. Cân bằng lược đồ độ xám cục bộ thích nghi **CLAHE** (Clip Limit 2.0, Grid $8\times 8$) làm nổi bật độ tương phản phế trường.
-  2. Khử nhiễu qua bộ lọc Gaussian Blur ($5\times 5$).
+- **Phương pháp**: Sử dụng thuật toán xử lý ảnh hình thái học thuần túy (không phụ thuộc trọng số nặng, tốc độ xử lý < 15ms):
+  1. Cân bằng lược đồ độ xám cục bộ thích nghi **CLAHE** (Clip Limit 2.0, Grid 8×8) làm nổi bật độ tương phản phế trường.
+  2. Khử nhiễu qua bộ lọc Gaussian Blur (5×5).
   3. Phân ngưỡng nhị phân nghịch đảo Otsu (Otsu's Inverse Thresholding).
   4. Phép đóng/mở hình thái học (Morphological Closing/Opening) lấp đầy các mạch máu phổi.
   5. Lọc lấy 2 vùng biên bao (Contour) lớn nhất đại diện cho phế trường phổi trái và phải.
 - **Xác định 6 phân khu giải phẫu**: Đỉnh phổi (Apical), Thùy trên (Upper), Thùy giữa/rốn phổi (Hilar/Middle), Thùy dưới (Lower), và Góc sườn hoành hai bên (Costophrenic Angles).
 
 #### B. Ma Trận Tương Quan Đồng Xuất Hiện Bệnh Lý 15×15 (Co-occurrence Correlation)
-Được trích xuất từ phân tích thống kê trên **107,880 ảnh X-quang thực tế** theo hệ số tương quan Pearson ($r \in [-1, 1]$). Hệ thống tự động nhận diện các tổ hợp hội chứng lâm sàng đa bệnh lý:
+Được trích xuất từ phân tích thống kê trên **107,880 ảnh X-quang thực tế** theo hệ số tương quan Pearson (r ∈ [-1, 1]). Hệ thống tự động nhận diện các tổ hợp hội chứng lâm sàng đa bệnh lý:
 - **Cardiomegaly + Effusion** → Gợi ý **Hội chứng suy tim sung huyết (CHF)**.
 - **Pneumonia + Consolidation** → Gợi ý **Viêm phổi thùy đông đặc cấp tính**.
 - **Mass + Atelectasis** → Cảnh báo **Khối u phế quản chèn ép gây xẹp phổi**.
 - **Fibrosis + Pleural Thickening** → Gợi ý **Tổn thương di chứng màng phổi - xơ hóa mạn tính**.
 
 #### C. Hệ Thống Tra Cứu Ca Tương Tự CBIR (Dynamic Incremental Indexing)
-- **Vector biểu diễn**: Vector 1536 chiều trích xuất từ tầng GAP của mô hình hybrid, được chuẩn hóa $\ell_2$.
+- **Vector biểu diễn**: Vector 1536 chiều trích xuất từ tầng GAP của mô hình hybrid, được chuẩn hóa L2.
 - **Cơ sở dữ liệu vector**: Sử dụng **Meta FAISS** với cấu trúc chỉ mục `IndexFlatIP` (Cosine Similarity trên vector chuẩn hóa):
-  $$S(\mathbf{u}, \mathbf{v}) = \sum_{i=1}^{1536} u_i \cdot v_i$$
+
+```text
+S(u, v) = ∑(u_i · v_i)   (với i = 1 đến 1536)
+```
+
 - **Cơ chế Dynamic Growth**: Bác sĩ có thể bấm nút **"Lưu ca bệnh tham chiếu"** trực tiếp trên giao diện web. Hệ thống tự động nạp vector đặc trưng của ảnh mới cùng kết luận xác thực vào cơ sở dữ liệu vector tức thời mà **không cần khởi động lại server hoặc tái huấn luyện**.
 
 #### D. Tự Động Sinh Báo Cáo Lâm Sàng & Trợ Lý Gemini 2.5 Flash
@@ -320,29 +299,19 @@ Hệ thống phục vụ người dùng kết hợp giữa giao diện Web React
 
 ```mermaid
 flowchart TB
-    subgraph CLIENT["1. TRÌNH DUYỆT BÁC SĨ (REACT 18 + VITE)"]
-        USER["Bác Sĩ / Kỹ Thuật Viên"] --> UPLOAD["Kéo & Thả Ảnh X-quang<br/>(DICOM / PNG / JPEG)"]
-        UPLOAD --> PREVIEW["Xem trước ảnh & Chỉnh slider ngưỡng lọc"]
-        PREVIEW --> API_CALL["Gửi HTTP POST /predict (Multipart Form)"]
-    end
+    UI_INPUT["Bác Sĩ Tải Ảnh X-Quang Lên Dashboard (React 18 + Vite)"] --> HTTP_REQ["Gửi HTTP Request: POST /predict (Multipart Form)"]
 
-    subgraph SERVER["2. MÁY CHỦ DỊCH VỤ (FASTAPI SERVER)"]
-        API_CALL --> ROUTE["FastAPI Controller (Port 8000)"]
-        ROUTE --> PREPROC["Tiền xử lý ảnh 2 luồng:<br/>• 384×384 (CheXNet)<br/>• 1024×1024 (YOLO)"]
-        PREPROC --> STAGING["CPU Staging & Quản lý bộ nhớ GPU<br/>(Duy trì tải VRAM ~1.21 GB)"]
-    end
+    HTTP_REQ --> FASTAPI["FastAPI Controller (Port 8000)<br/>Tiếp nhận và tiền xử lý ảnh song song 384px & 1024px"]
 
-    subgraph ENGINE["3. BỘ MÁY XỬ LÝ & TÍCH HỢP"]
-        STAGING --> INFER["Suy Luận Song Song:<br/>• CheXNet Hybrid ➜ P_cls, Heatmaps, Embeddings<br/>• YOLO11m ➜ Bounding Boxes, Conf_YOLO<br/>• Otsu + CLAHE ➜ 6 Vùng giải phẫu phổi"]
-        INFER --> FUSION_OP["Hợp Nhất Đa Mô Hình:<br/>• Cascade Filter: Score = P_cls × Conf_YOLO<br/>• Display Fusion: Heatmap ⊂ Bounding Box"]
-        FUSION_OP --> CBIR_OP["Meta FAISS: Tìm Top-3 ca bệnh tương tự"]
-        FUSION_OP --> GEMINI_OP["Google Gemini AI: Sinh báo cáo phân tích y khoa"]
-    end
+    FASTAPI --> GPU_EXEC["Bộ Điều Phối Thực Thi GPU (~1.21 GB VRAM)<br/>• CheXNet Hybrid ➜ 15 P_cls, Heatmaps, Vector 1536d<br/>• YOLO11m ➜ Bounding Boxes [x1,y1,x2,y2], Conf_YOLO<br/>• Otsu & CLAHE ➜ 6 Phân vùng giải phẫu lồng ngực"]
 
-    subgraph UI_RENDER["4. TRỰC QUAN HÓA TRÊN DASHBOARD"]
-        FUSION_OP & CBIR_OP & GEMINI_OP --> JSON_DATA["Trả về kết quả JSON"]
-        JSON_DATA --> DASHBOARD["Giao Diện Web Bác Sĩ:<br/>• Dual-Viewer đồng bộ (Ảnh Gốc ⟷ Display Fusion)<br/>• Lớp phủ Bounding Box trực quan tương tác<br/>• Danh sách ca bệnh tương tự kèm hình ảnh<br/>• Báo cáo lâm sàng chuẩn hóa Tiếng Việt"]
-    end
+    GPU_EXEC --> FUSION_CORE["Bộ Hợp Nhất Suy Luận<br/>• Cascade Filter: Score = P_cls × Conf_YOLO (Lọc sạch FP)<br/>• Display Fusion: Giới hạn Attention Heatmap trong Bounding Box"]
+
+    FUSION_CORE --> CLINICAL_CORE["Khối Phân Tích Lâm Sàng Tự Động<br/>• Ma trận 15×15: Phát hiện Hội chứng kết hợp (CHF, Viêm đông đặc)<br/>• Meta FAISS: Truy vấn Top-3 ca bệnh tương tự từ vector 1536d<br/>• Google Gemini: Sinh báo cáo y khoa & Đề xuất cận lâm sàng"]
+
+    CLINICAL_CORE --> JSON_OUT["Đóng Gói Kết Quả JSON Trả Về Trình Duyệt"]
+
+    JSON_OUT --> UI_VIEW["Giao Diện Web Dashboard Hiển Thị Trực Quan<br/>• Viewer kép đồng bộ (Ảnh Gốc ⟷ Display Fusion)<br/>• Lớp phủ Bounding Box có thể bật/tắt theo ngưỡng<br/>• Bảng ca bệnh tương tự kèm hình ảnh minh chứng<br/>• Biên bản chẩn đoán lâm sàng Tiếng Việt"]
 ```
 
 ---
@@ -355,28 +324,21 @@ Quy trình huấn luyện mạng phân loại cốt lõi CheXNet Hybrid (ConvNeX
 
 ```mermaid
 flowchart TB
-    subgraph DATA_PIPELINE["1. DỮ LIỆU & TIỀN XỬ LÝ"]
-        NIH_RAW["Tập Dữ Liệu NIH ChestX-ray 14<br/>(112,120 ảnh X-quang, 15 nhãn)"] --> PATIENT_SPLIT["Phân chia cấp Bệnh nhân (Patient-level Split)<br/>Train (70%) • Val (10%) • Test (20%)"]
-        PATIENT_SPLIT --> AUGMENT["Data Augmentation:<br/>• Random Horizontal Flip (p=0.5)<br/>• Random Affine Rotation (±10°)<br/>• Color Jitter & CLAHE tương phản<br/>• Resize 384×384 & Mean/Std Norm"]
-    end
+    NIH_DS["Tập Dữ Liệu NIH ChestX-ray 14 (112,120 ảnh, 15 nhãn)"] --> DATA_SPLIT["Phân Chia Tập Cấp Bệnh Nhân (Patient-level Split)<br/>Train (70%) • Val (10%) • Test (20%)"]
 
-    subgraph MODEL_SETUP["2. KHỞI TẠO MÔ HÌNH"]
-        CONV_PRE["ConvNeXtV2-Large<br/>(ImageNet-22k Pretrained)"]
-        SWIN_PRE["SwinV2-Large<br/>(ImageNet-22k Pretrained)"]
-        MODULES_INIT["Khởi Tạo Khối Chức Năng:<br/>• FPN Multi-Scale Lateral & Merge<br/>• 15 Attention Heads độc lập<br/>• Tham số Gating α ban đầu"]
-        CONV_PRE & SWIN_PRE & MODULES_INIT --> ASSEMBLE["Lắp Ráp Hoàn Chỉnh CheXNet Hybrid"]
-    end
+    DATA_SPLIT --> AUG_PIPE["Data Augmentation & Tiền Xử Lý<br/>Random Flip, Xoay ±10°, CLAHE, Resize 384×384 & Normalization"]
 
-    subgraph TRAINING_STEP["3. VÒNG LẶP HUẤN LUYỆN TỐI ƯU HÓA"]
-        AUGMENT & ASSEMBLE --> FORWARD_PASS["Lan Truyền Tiến (Forward Pass)<br/>Mixed Precision (AMP fp16) + Gradient Checkpointing"]
-        FORWARD_PASS --> LOSS_CALC["Hàm Mất Mát Kết Hợp:<br/>• Loss Phân Loại: Weighted Multi-label BCE / Asymmetric Loss<br/>• Loss Attention: Regularization Loss ép khu trú tổn thương<br/>➜ Loss_Total = Loss_cls + λ · Loss_att"]
-        LOSS_CALC --> OPTIM_STEP["Lan Truyền Ngược & Tối Ưu:<br/>• GradScaler chống Underflow FP16<br/>• AdamW Optimizer (Weight Decay 1e-2)<br/>• Cosine Annealing Learning Rate Scheduler"]
-    end
+    AUG_PIPE --> MODEL_BUILD["Khởi Tạo Kiến Trúc CheXNet Hybrid<br/>• Backbone ConvNeXtV2 & SwinV2 (Pretrained ImageNet-22k)<br/>• Khởi tạo FPN Decoder, 15-Channel Attention Head & Gating α"]
 
-    subgraph VALIDATION_CHECKPOINT["4. ĐÁNH GIÁ & LƯU CHECKPOINT"]
-        OPTIM_STEP --> VAL_LOOP["Đánh Giá Hết Mỗi Epoch trên Validation Set:<br/>• Tính Mean AUROC & PR-AUC trên 15 lớp bệnh<br/>• Xác định ngưỡng phân lớp tối ưu Thr* (Youden's J)"]
-        VAL_LOOP --> SAVE_BEST["Early Stopping (Patience = 7)<br/>Lưu Checkpoint Tối Ưu ➜ hybrid_model.pth"]
-    end
+    MODEL_BUILD --> TRAIN_FORWARD["Lan Truyền Tiến (Forward Pass)<br/>Tự động bật Mixed Precision (AMP fp16) & Gradient Checkpointing"]
+
+    TRAIN_FORWARD --> LOSS_EVAL["Tính Toán Hàm Mất Mát Đa Mục Tiêu<br/>• Loss Phân Loại: Weighted Multi-label BCE / Asymmetric Loss<br/>• Loss Chú Ý: Regularization Loss chống sụp đổ bản đồ nhiệt<br/>➜ Loss_Total = Loss_cls + λ · Loss_att"]
+
+    LOSS_EVAL --> OPTIM_BACKWARD["Lan Truyền Ngược & Cập Nhật Trọng Số<br/>• GradScaler chống hiện tượng Underflow FP16<br/>• Optimizer: AdamW (Weight Decay 1e-2)<br/>• Scheduler: Cosine Annealing Learning Rate"]
+
+    OPTIM_BACKWARD --> VAL_CHECK["Đánh Giá Sau Mỗi Epoch trên Tập Validation<br/>• Tính Mean AUROC & PR-AUC trên toàn bộ 15 lớp bệnh<br/>• Xác định ngưỡng phân lớp tối ưu Thr* theo chỉ số Youden's J"]
+
+    VAL_CHECK --> SAVE_MODEL["Lưu Trọng Số Xuất Sắc Nhất (Early Stopping)<br/>➜ Lưu file trọng số: hybrid_model.pth"]
 ```
 
 #### B. Quá Trình Huấn Luyện Model YOLO11m
@@ -385,30 +347,22 @@ Quy trình huấn luyện mạng định vị tổn thương YOLO11m kết hợp
 
 ```mermaid
 flowchart TB
-    subgraph DATA_FORMULATION["1. TỔNG HỢP DỮ LIỆU ĐA NGUỒN"]
-        VINDR_DS["Tập VinDr-CXR (18,000 ảnh)<br/>BBox từ nhiều Bác sĩ X-quang"] --> WBF_CONSENSUS["Weighted Boxes Fusion (WBF)<br/>Hợp nhất BBox đồng thuận"]
-        
-        NIH_DS["Tập NIH ChestX-ray 14 (112,120 ảnh)<br/>Nhãn bệnh không có BBox"] --> PSEUDO_DISTILL["Knowledge Distillation:<br/>Dùng Attention Maps từ CheXNet Model<br/>sinh Pseudo BBox cho 4 bệnh thiếu<br/>(Pneumonia, Edema, Emphysema, Hernia)"]
+    DS_VINDR["Tập VinDr-CXR (18,000 ảnh)<br/>Bounding Box thực từ Bác sĩ X-quang"] --> WBF_STEP["Gộp Box Đồng Thuận Bằng Thuật Toán WBF<br/>(Weighted Boxes Fusion)"]
+    
+    DS_NIH["Tập NIH ChestX-ray 14 (112,120 ảnh)<br/>Ảnh có nhãn bệnh nhưng chưa có BBox"] --> DISTILL_STEP["Phương Pháp Chưng Cất Tri Thức (Knowledge Distillation):<br/>Dùng Attention Maps từ CheXNet Model<br/>để trích xuất Pseudo BBox cho 4 bệnh thiếu"]
 
-        WBF_CONSENSUS & PSEUDO_DISTILL --> UNIFIED_YOLO["Bộ Dữ Liệu Đồng Bộ 14 Lớp Bệnh<br/>Chuyển sang format YOLO txt: [cls, xc, yc, w, h]"]
-    end
+    WBF_STEP --> UNIFIED_DATA["Tạo Bộ Dữ Liệu Đồng Bộ 14 Lớp Bệnh Lý<br/>Chuyển đổi nhãn tọa độ sang định dạng chuẩn YOLO txt"]
+    DISTILL_STEP --> UNIFIED_DATA
 
-    subgraph MULTI_PHASE["2. HUẤN LUYỆN LŨY TIẾN 2 GIAI ĐOẠN"]
-        UNIFIED_YOLO --> PHASE_640["Giai Đoạn 1: Học Nhanh Ở Độ Phân Giải 640×640<br/>• Khởi tạo pretrained YOLO11m<br/>• Nắm bắt tổn thương lớn (Cardiomegaly, Effusion)<br/>• Augmentation: Mosaic, MixUp, Perspective"]
-        PHASE_640 --> PHASE_1024["Giai Đoạn 2: Tinh Chỉnh Độ Phân Giải Cao 1024×1024<br/>• Tăng kích thước ảnh lên 1024px<br/>• Bắt vi tổn thương nhỏ (Nodule, Calcification, dải màng phổi)<br/>• Giảm Learning Rate + HSV Jitter"]
-    end
+    UNIFIED_DATA --> PROG_P1["Giai Đoạn 1: Khởi Động Nhanh (Độ Phân Giải 640×640)<br/>• Khởi tạo trọng số pretrained YOLO11m<br/>• Học bố cục tổng quan các tổn thương lớn (Bóng tim to, Tràn dịch)<br/>• Augmentation: Mosaic, MixUp, Random Perspective"]
 
-    subgraph LOSS_OPTIM["3. HÀM MẤT MÁT & TỐI ƯU HÓA"]
-        PHASE_1024 --> LOSS_DFL_CIOU["Loss Tọa Độ Hộp: Complete IoU (CIoU) + DFL"]
-        PHASE_1024 --> LOSS_BCE["Loss Phân Loại: Binary Cross-Entropy (BCE)"]
-        LOSS_DFL_CIOU & LOSS_BCE --> BACKPROP["Lan Truyền Ngược & Cập Nhật Trọng Số<br/>Optimizer: SGD / AdamW với Cosine LR"]
-    end
+    PROG_P1 --> PROG_P2["Giai Đoạn 2: Tinh Chỉnh Chi Tiết (Độ Phân Giải Cao 1024×1024)<br/>• Tăng kích thước ảnh lên 1024px để bắt vi tổn thương nhỏ (Nốt mờ, vôi hóa)<br/>• Giảm Learning Rate, áp dụng HSV Jitter & Tối ưu hóa Loss CIoU + DFL + BCE"]
 
-    subgraph EVAL_EXPORT["4. ĐÁNH GIÁ & XUẤT MÔ HÌNH"]
-        BACKPROP --> TTA_EVAL["Đánh Giá Kiểm Thử với TTA (Test-Time Augmentation):<br/>Dự đoán ảnh gốc + Ảnh lật ngang + Gộp Box qua WBF"]
-        TTA_EVAL --> MAP_METRICS["Đo lường Chỉ Số: mAP@50, mAP@50-95 trên 14 lớp"]
-        MAP_METRICS --> SAVE_YOLO["Xuất Trọng Số Tối Ưu ➜ yolov11m.pt<br/>(Tích hợp vào luồng Cascade Inference)"]
-    end
+    PROG_P2 --> TTA_TEST["Đánh Giá Kiểm Thử với Kỹ Thuật TTA (Test-Time Augmentation)<br/>Dự đoán ảnh gốc + Ảnh lật ngang và gộp kết quả qua WBF"]
+
+    TTA_TEST --> METRIC_CHECK["Đo Lường Các Chỉ Số Khoa Học Độc Lập<br/>mAP@50, mAP@50-95, Precision, Recall trên 14 lớp bệnh"]
+
+    METRIC_CHECK --> EXPORT_WEIGHTS["Xuất Trọng Số Tối Ưu Nhất Đạt Tiêu Chuẩn<br/>➜ Lưu file trọng số: yolov11m.pt"]
 ```
 
 ---
@@ -534,7 +488,7 @@ Trước đây, bác sĩ thường bị bối rối khi Attention Heatmap của 
 
 ## 📊 Báo Cáo Đánh Giá Thực Nghiệm (Results Report)
 
-Hiệu năng của mô hình được đánh giá độc lập trên **2 bộ kiểm thử quy mô lớn** với đầy đủ các thước đo chuẩn bài báo khoa học: **AUROC**, **PR-AUC**, **Optimal Thresholds ($Thr^*$) theo chỉ số Youden's J**, **F1-Score**, và **Bootstrap 95% Confidence Interval**.
+Hiệu năng của mô hình được đánh giá độc lập trên **2 bộ kiểm thử quy mô lớn** với đầy đủ các thước đo chuẩn bài báo khoa học: **AUROC**, **PR-AUC**, **Ngưỡng tối ưu (Thr*) theo chỉ số Youden's J**, **F1-Score**, và **Bootstrap 95% Confidence Interval**.
 
 ---
 
@@ -544,7 +498,7 @@ Tập kiểm thử chuẩn NIH gồm hơn 25,000 ảnh X-quang lồng ngực v�
 
 #### Bảng thông số chi tiết từng bệnh lý:
 
-| STT | Bệnh lý | AUROC | PR-AUC | Ngưỡng tối ưu ($Thr^*$) | F1 @ 0.5 | F1 @ $Thr^*$ |
+| STT | Bệnh lý | AUROC | PR-AUC | Ngưỡng tối ưu (Thr*) | F1 @ 0.5 | F1 @ Thr* |
 |:---:|:---|:---:|:---:|:---:|:---:|:---:|
 | 1 | **No Finding** | 0.8348 | 0.8460 | 0.793 | 0.7082 | **0.7714** |
 | 2 | **Atelectasis** (Xẹp phổi) | 0.8733 | 0.4907 | 0.608 | 0.3378 | **0.4536** |
@@ -583,7 +537,7 @@ Tập dữ liệu kết hợp giữa **VinDr-CXR** (ảnh có bounding box chấ
 
 #### Bảng thông số chi tiết từng bệnh lý:
 
-| STT | Bệnh lý | AUROC | PR-AUC | Ngưỡng tối ưu ($Thr^*$) | F1 @ 0.5 | F1 @ $Thr^*$ |
+| STT | Bệnh lý | AUROC | PR-AUC | Ngưỡng tối ưu (Thr*) | F1 @ 0.5 | F1 @ Thr* |
 |:---:|:---|:---:|:---:|:---:|:---:|:---:|
 | 1 | **No Finding** | 0.8346 | 0.8703 | 0.815 | 0.7411 | **0.7803** |
 | 2 | **Atelectasis** (Xẹp phổi) | 0.8567 | 0.4298 | 0.584 | 0.3147 | **0.3948** |
@@ -719,7 +673,7 @@ npm install
 npm run dev
 ```
 Truy cập trình duyệt tại địa chỉ: `http://localhost:5173` để trải nghiệm:
-- **Kéo & Thả ảnh X-quang**: Xem Viewer ảnh kép (Ảnh gốc $\leftrightarrow$ Heatmap Display Fusion).
+- **Kéo & Thả ảnh X-quang**: Xem Viewer ảnh kép (Ảnh gốc ⟷ Heatmap Display Fusion).
 - **Thẻ phát hiện YOLO11m**: Hiển thị vị trí bounding box và điểm cascade.
 - **Báo cáo y khoa Tiếng Việt**: Tự động tổng hợp kết luận và khuyến nghị điều trị.
 - **Dynamic Growth (CBIR)**: Bấm lưu ca bệnh vào cơ sở dữ liệu vector FAISS cục bộ.
@@ -738,7 +692,7 @@ Hệ thống phân loại và định vị 15 nhãn bệnh lý lồng ngực the
 | 3 | **Effusion** | Tràn dịch màng phổi | Nguy cơ cao |
 | 4 | **Infiltration** | Thâm nhiễm nhu mô phổi | Trung bình |
 | 5 | **Mass** | Khối u phổi (> 3cm) | Cần sinh thiết |
-| 6 | **Nodule** | Nốt mờ phổi ($\le$ 3cm) | Cần theo dõi |
+| 6 | **Nodule** | Nốt mờ phổi (≤ 3cm) | Cần theo dõi |
 | 7 | **Pneumonia** | Viêm phổi | Khẩn cấp |
 | 8 | **Pneumothorax** | Tràn khí màng phổi | Cấp cứu tối khẩn |
 | 9 | **Consolidation** | Đông đặc phế nang | Nguy cơ cao |
