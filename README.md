@@ -44,17 +44,17 @@
 
 2. **Hợp Nhất Đa Mô Hình (Classifier + Detector)**:
    - Chạy song song CheXNet Classifier và **YOLO11m** Object Detector trên cùng một luồng GPU.
-   - **Cascade 2-Stage Filter**: $\text{Final\_Score} = P_{\text{CheXNet}}(disease) \times \text{Conf}_{\text{YOLO}}(box)$, triệt tiêu trên 90% False Positives.
+   - **Cascade 2-Stage Filter**: $\text{Score}_{\text{Cascade}} = P_{\text{CheXNet}}(\text{disease}) \times \text{Conf}_{\text{YOLO}}(\text{box})$, triệt tiêu trên 90% False Positives.
    - **Display Fusion**: Heatmap chỉ hiển thị bên trong Bounding Box của YOLO, viền xanh liền nét (tin cậy cao). Khi không có BBox, hệ thống tự động fallback sang Heatmap toàn ảnh viền cam đứt nét.
 
 3. **Trí Tuệ Lâm Sàng Toàn Diện**:
    - **Định vị giải phẫu & Phân vùng phổi**: Ứng dụng CLAHE + Otsu xác định vị trí tổn thương (Đỉnh phổi, Thùy trên/giữa/dưới, Góc sườn hoành).
-   - **Ma trận đồng xuất hiện (Co-occurrence Matrix 15×15)**: Phát hiện hội chứng kết hợp (ví dụ: *Cardiomegaly + Effusion* $\rightarrow$ *Suy tim sung huyết*).
+   - **Ma trận đồng xuất hiện (Co-occurrence Matrix 15×15)**: Phát hiện hội chứng kết hợp (ví dụ: *Cardiomegaly + Effusion* → *Suy tim sung huyết*).
    - **CBIR Dynamic Growth (FAISS IndexFlatIP 1536-dim)**: Tìm kiếm các ca bệnh tương tự dựa trên vector nhúng đặc trưng, tự động học hỏi thêm ca bệnh mới trong quá trình bác sĩ làm việc.
    - **Báo cáo y khoa chuẩn hóa**: Sinh báo cáo lâm sàng bằng Tiếng Việt và hỗ trợ tạo phân tích bệnh sinh chuyên sâu với Google Gemini AI.
 
 4. **Tối Ưu Hóa VRAM Đột Phá**:
-   - Tinh chỉnh cơ chế nạp Checkpoint phân tầng (CPU Staging $\rightarrow$ Clean Model to CUDA), giúp tổng VRAM tiêu thụ của **cả 2 mô hình chỉ tốn ~1.21 GB**, vận hành mượt mà trên laptop thông thường (NVIDIA RTX 3050 Laptop).
+   - Tinh chỉnh cơ chế nạp Checkpoint phân tầng (CPU Staging → Clean Model to CUDA), giúp tổng VRAM tiêu thụ của **cả 2 mô hình chỉ tốn ~1.21 GB**, vận hành mượt mà trên laptop thông thường (NVIDIA RTX 3050 Laptop).
 
 ---
 
@@ -69,95 +69,72 @@ Hệ thống **CheXNet Pro AI** được thiết kế theo mô hình kiến trú
 Sơ đồ thể hiện chi tiết luồng xử lý từ ảnh X-quang đầu vào, qua các tầng trích xuất đặc trưng với kích thước tensor cụ thể, khối hòa trộn FPN, cổng gating, hợp nhất suy luận đa mô hình cho đến giao diện web:
 
 ```mermaid
-flowchart TB
-    subgraph INPUT["🖼️ 1. DỮ LIỆU ĐẦU VÀO"]
-        RAW["Ảnh X-Quang Ngực Thẳng (DICOM / PNG / JPEG)"]
-        NORM_CLS["Chuẩn Hóa CheXNet<br/>Shape: [B, 3, 384, 384]<br/>Mean/Std Normalization"]
-        NORM_DET["Chuẩn Hóa YOLO<br/>Shape: [B, 3, 1024, 1024]<br/>Aspect-Ratio Preserved"]
-        RAW --> NORM_CLS
-        RAW --> NORM_DET
+flowchart TD
+    %% ================= GLOBAL STYLING =================
+    classDef inputStyle fill:#E1F5FE,stroke:#0288D1,stroke-width:2px,color:#01579B,font-weight:bold;
+    classDef modelStyle fill:#EDE7F6,stroke:#5E35B1,stroke-width:2px,color:#311B92;
+    classDef fusionStyle fill:#FFF3E0,stroke:#FB8C00,stroke-width:2px,color:#E65100,font-weight:bold;
+    classDef clinicalStyle fill:#E8F5E9,stroke:#43A047,stroke-width:2px,color:#1B5E20;
+    classDef uiStyle fill:#FCE4EC,stroke:#D81B60,stroke-width:2px,color:#880E4F,font-weight:bold;
+
+    %% ================= 1. INPUT =================
+    INPUT["🖼️ <b>ẢNH X-QUANG ĐẦU VÀO</b><br/>(DICOM / PNG / JPEG)"]:::inputStyle
+
+    %% ================= 2. PARALLEL PROCESSING =================
+    subgraph PHASE1 ["🧠 BƯỚC 1: XỬ LÝ SONG SONG TRÊN GPU (VRAM ~1.21 GB)"]
+        direction LR
+        CHEX["<b>1. CheXNet Hybrid (384×384)</b><br/>• ConvNeXtV2-Large (Đặc trưng cục bộ)<br/>• SwinV2-Large (Ngữ cảnh toàn cục)<br/>• FPN Decoder + 15 Attention Heads<br/>• Gated Residual Attention (α ≤ 0.8)<br/><i>➜ 15 P_cls, 15 Heatmaps M_k, Vector 1536d</i>"]:::modelStyle
+        YOLO["<b>2. YOLO11m Detector (1024×1024)</b><br/>• Backbone C3k2 + SPPF + C2PSA<br/>• Decoupled Anchor-Free Head<br/><i>➜ Tọa độ Bounding Box [x1,y1,x2,y2]<br/>➜ Độ tin cậy phát hiện Conf_YOLO</i>"]:::modelStyle
+        LUNG["<b>3. Định Vị Phổi Cổ Điển</b><br/>• Cân bằng CLAHE + Gaussian Blur<br/>• Phân đoạn Otsu Thresholding (15ms)<br/><i>➜ 6 Vùng giải phẫu lồng ngực</i>"]:::modelStyle
     end
 
-    subgraph CHEXNET["🧠 2. CHEXNET HYBRID CNN-VIT CLASSIFIER (~1.12 GB VRAM)"]
-        direction TB
-        subgraph CNN_BRANCH["Nhánh 1: ConvNeXtV2-Large (Local Textures)"]
-            DW_CONV["7×7 Depthwise Conv + Inverted Bottleneck"]
-            GRN["Global Response Normalization (GRN)"]
-            STAGE3["Stage-3 Features: [B, 1536, 24, 24]"]
-            STAGE4["Stage-4 Features: [B, 1536, 12, 12]"]
-            DW_CONV --> GRN --> STAGE3 --> STAGE4
-        end
-
-        subgraph VIT_BRANCH["Nhánh 2: SwinV2-Large (Global Context)"]
-            W_MSA["Shifted Window Self-Attention (W-MSA / SW-MSA)"]
-            POST_LN["Post-LayerNorm + Cosine Attention"]
-            SWIN_OUT["SwinV2 Stage-4: [B, 1536, 12, 12]"]
-            W_MSA --> POST_LN --> SWIN_OUT
-        end
-
-        subgraph FPN_BLOCK["FPN Multi-Scale Decoder"]
-            UP_VIT["Upsample Bilinear (12×12 → 24×24)"]
-            LAT_CNN["Lateral Conv 1×1(Stage-3 CNN)"]
-            MERGE_CONV["Merge Conv 3×3 + BatchNorm + GELU"]
-            FPN_FEAT["FPN Features: [B, 256, 24, 24]"]
-            UP_VIT & LAT_CNN --> MERGE_CONV --> FPN_FEAT
-        end
-
-        subgraph ATTENTION_GATING["15-Channel Spatial Attention & Channel Gating"]
-            ATT_HEAD["Spatial Conv 3×3 → Conv 1×1 → Sigmoid<br/>15 Bản đồ nhiệt: M ∈ [B, 15, 24, 24]"]
-            GATE_BLOCK["Per-Class Residual Channel Gating<br/>F'_k = F_k + α · (F_k ⊙ M_k)<br/>α = Sigmoid(raw) × 0.8 ∈ [0, 0.8]"]
-            ATT_HEAD --> GATE_BLOCK
-        end
-
-        subgraph OUTPUT_HEADS["Đầu Ra Dự Đoán & Trích Xuất Vector Nhúng"]
-            GAP["Global Average Pooling (GAP)"]
-            EMBEDDING["Feature Embedding: [B, 1536]<br/>(Dùng cho CBIR Tra Cứu Ca Tương Tự)"]
-            FC["Linear Classifier: [B, 15]<br/>Sigmoid: P_cls ∈ [0, 1]^15"]
-            GAP --> EMBEDDING
-            GAP --> FC
-        end
-
-        STAGE4 --> W_MSA
-        SWIN_OUT --> UP_VIT
-        STAGE3 --> LAT_CNN
-        FPN_FEAT --> ATT_HEAD
-        STAGE4 --> GATE_BLOCK
-        GATE_BLOCK --> GAP
+    %% ================= 3. MULTI-MODEL FUSION =================
+    subgraph PHASE2 ["⚡ BƯỚC 2: HỢP NHẤT SUY LUẬN ĐA MÔ HÌNH (FUSION ENGINE)"]
+        direction LR
+        CASCADE["<b>Cascade 2-Stage Filter</b><br/>Score = P_cls × Conf_YOLO<br/><i>Triệt tiêu hơn 90% Dương Tính Giả (False Positives)</i>"]:::fusionStyle
+        DISPLAY["<b>Cơ Chế Trực Quan Hóa Display Fusion</b><br/>Bản đồ nhiệt Heatmap được cắt khớp bên trong Bounding Box<br/><i>Viền xanh liền nét (Tin cậy cao) | Viền cam nét đứt (Tham khảo)</i>"]:::fusionStyle
     end
 
-    subgraph YOLO_MODULE["🎯 3. YOLO11m LESION DETECTOR (~0.09 GB VRAM)"]
-        YOLO_BACKBONE["Backbone: C3k2 + SPPF + C2PSA Attention"]
-        YOLO_NECK["PAFPN Neck (Đa Tỷ Lệ P3, P4, P5)"]
-        YOLO_HEAD["Decoupled Anchor-Free Detection Head"]
-        YOLO_BOXES["Bounding Boxes: [x1, y1, x2, y2]<br/>Class Confidences: Conf_YOLO"]
-        NORM_DET --> YOLO_BACKBONE --> YOLO_NECK --> YOLO_HEAD --> YOLO_BOXES
+    %% ================= 4. CLINICAL INTELLIGENCE =================
+    subgraph PHASE3 ["⚕️ BƯỚC 3: TRÍ TUỆ LÂM SÀNG VÀ CHẨN ĐOÁN HỖ TRỢ"]
+        direction LR
+        COOC["<b>Ma Trận Tương Quan 15×15</b><br/>Phát hiện Hội chứng kết hợp<br/><i>(Suy tim sung huyết, Viêm phổi thùy,...)</i>"]:::clinicalStyle
+        CBIR["<b>FAISS IndexFlatIP (1536-dim)</b><br/>Truy vấn Ca bệnh tương tự từ CSDL<br/><i>Cơ chế tự học liên tục (Dynamic Growth)</i>"]:::clinicalStyle
+        LLM["<b>Google Gemini 2.5 Flash</b><br/>Sinh Báo Cáo Lâm Sàng Chuẩn Hóa<br/><i>Gợi ý chẩn đoán và hướng xử trí y khoa</i>"]:::clinicalStyle
     end
 
-    subgraph FUSION_ENGINE["⚡ 4. MULTI-MODEL FUSION ENGINE"]
-        CASCADE["Cascade 2-Stage Filter:<br/>Final_Score = P_cls × Conf_YOLO<br/>Ngưỡng lọc FP: 0.05 - 0.15"]
-        DISPLAY_FUSION["Display Fusion:<br/>Khoanh vùng Heatmap ⊂ Bounding Box<br/>Khung xanh nét liền (Tin cậy cao) / Khung cam nét đứt"]
-        FC & YOLO_BOXES --> CASCADE
-        ATT_HEAD & YOLO_BOXES --> DISPLAY_FUSION
+    %% ================= 5. SERVING & UI =================
+    subgraph PHASE4 ["🌐 BƯỚC 4: HỆ THỐNG PHỤC VỤ VÀ GIAO DIỆN BÁC SĨ"]
+        direction LR
+        API["<b>FastAPI Server (Port 8000)</b><br/>Xử lý Bất đồng bộ (Async) • Nạp mô hình phân tầng"]:::uiStyle
+        WEB["<b>Dashboard Web Bác Sĩ (Port 5173)</b><br/>Viewer Ảnh Kép • BBox Overlay • Báo Cáo Tương Tác"]:::uiStyle
+        API --> WEB
     end
 
-    subgraph CLINICAL["⚕️ 5. KHỐI TRÍ TUỆ LÂM SÀNG (CLINICAL INTELLIGENCE)"]
-        LUNG_SEG["Phân Vùng Phổi Cổ Điển (CLAHE + Otsu + Morphology)<br/>Xác định 6 vùng giải phẫu: Đỉnh, Thùy trên/giữa/dưới, Góc sườn hoành"]
-        COOC_MAT["Ma Trận Đồng Xuất Hiện 15×15 (Pearson Correlation)<br/>Phát hiện hội chứng kết hợp: Suy tim sung huyết, Đông đặc cấp,..."]
-        CBIR_DB["CBIR FAISS IndexFlatIP (1536 chiều)<br/>Tìm kiếm ca bệnh tương tự & Lưu ca mới (Dynamic Growth)"]
-        LLM_REPORT["Bộ Sinh Báo Cáo Lâm Sàng Tiếng Việt<br/>Tích hợp Google Gemini 2.5 Flash phân tích chuyên sâu"]
-        
-        RAW --> LUNG_SEG
-        FC --> COOC_MAT
-        EMBEDDING --> CBIR_DB
-        CASCADE & LUNG_SEG & COOC_MAT --> LLM_REPORT
-    end
+    %% ================= DATA FLOW CONNECTIONS =================
+    INPUT ==> CHEX
+    INPUT ==> YOLO
+    INPUT ==> LUNG
 
-    subgraph SERVING["🌐 6. HỆ THỐNG PHỤC VỤ (FULL-STACK SERVING)"]
-        API["FastAPI Backend Server (Port 8000)<br/>Endpoint: /predict, /api/add_reference_case"]
-        WEB_UI["React 18 + Vite + Tailwind CSS v4 Dashboard (Port 5173)<br/>Viewer ảnh kép, Bounding Box Overlay, Báo cáo tương tác"]
-        FUSION_ENGINE & CLINICAL --> API
-        API --> WEB_UI
-    end
+    CHEX ==> CASCADE
+    YOLO ==> CASCADE
+
+    CHEX ==> DISPLAY
+    YOLO ==> DISPLAY
+
+    CASCADE --> COOC
+    LUNG --> COOC
+
+    CHEX -. Trích xuất Vector 1536d .-> CBIR
+
+    CASCADE --> LLM
+    COOC --> LLM
+    LUNG --> LLM
+
+    CASCADE ==> API
+    DISPLAY ==> API
+    CBIR ==> API
+    LLM ==> API
 ```
 
 ---
@@ -233,11 +210,11 @@ Nhánh định vị chạy song song mô hình **YOLO11m** (Ultralytics) đượ
               │                                  │
               └───────────────┬──────────────────┘
                               ▼
-            ┌───────────────────────────────────┐
-            │       Cascade 2-Stage Filter      │
-            │   Final_Score = P_cls × Conf_YOLO │
-            └─────────────────┬─────────────────┘
-                              ▼
+             ┌───────────────────────────────────┐
+             │       Cascade 2-Stage Filter      │
+             │   Score_Cascade = P_cls × Conf_YOLO│
+             └─────────────────┬─────────────────┘
+                               ▼
         ┌───────────────────────────────────────────┐
         │        Display Fusion Visualizer          │
         │   ┌───────────────────────────────────┐   │
@@ -254,12 +231,12 @@ Nhánh định vị chạy song song mô hình **YOLO11m** (Ultralytics) đượ
 
 #### A. Bộ Lọc Phân Tầng Cascade 2-Stage
 Các mô hình phân loại toàn cục thường dễ mắc lỗi dương tính giả (False Positives) do các bóng mờ sinh lý hoặc thiết bị y tế (dây đo, máy tạo nhịp). Ngược lại, detector cục bộ dễ bị nhiễu nền nếu không có ngữ cảnh tổng quát. Hệ thống áp dụng công thức xác suất liên hợp:
-$$\text{Final\_Score}_c = P_{\text{CheXNet}}(c) \times \text{Conf}_{\text{YOLO}}(c)$$
+$$\text{Score}_{\text{Cascade}}(c) = P_{\text{CheXNet}}(c) \times \text{Conf}_{\text{YOLO}}(c)$$
 Hệ thống thiết lập các ngưỡng phân tầng theo mức độ ưu tiên lâm sàng:
-- **Nguy kịch (Critical)** (*Pneumothorax, Pneumonia*): Ngưỡng cắt **$0.05$** $\rightarrow$ Tối đa hóa Recall nhằm không bỏ sót ca cấp cứu đe dọa tính mạng.
-- **Nguy cơ cao (High)** (*Cardiomegaly, Effusion*): Ngưỡng cắt **$0.10$**.
-- **Đông đặc (Consolidation)**: Ngưỡng cắt **$0.12$**.
-- **Mặc định**: Ngưỡng cắt **$0.15$**.
+- **Nguy kịch (Critical)** (*Pneumothorax, Pneumonia*): Ngưỡng cắt **0.05** → Tối đa hóa Recall nhằm không bỏ sót ca cấp cứu đe dọa tính mạng.
+- **Nguy cơ cao (High)** (*Cardiomegaly, Effusion*): Ngưỡng cắt **0.10**.
+- **Đông đặc (Consolidation)**: Ngưỡng cắt **0.12**.
+- **Mặc định**: Ngưỡng cắt **0.15**.
 
 #### B. Cơ Chế Trực Quan Hóa Display Fusion
 Một vấn đề lớn trong các hệ thống CADx truyền thống là sự xung đột thị giác giữa Attention Heatmap (thường lan tỏa rộng) và Bounding Box (khu trú gọn). **Display Fusion** chuẩn hóa trải nghiệm:
@@ -283,10 +260,10 @@ Một vấn đề lớn trong các hệ thống CADx truyền thống là sự x
 
 #### B. Ma Trận Tương Quan Đồng Xuất Hiện Bệnh Lý 15×15 (Co-occurrence Correlation)
 Được trích xuất từ phân tích thống kê trên **107,880 ảnh X-quang thực tế** theo hệ số tương quan Pearson ($r \in [-1, 1]$). Hệ thống tự động nhận diện các tổ hợp hội chứng lâm sàng đa bệnh lý:
-- $\text{Cardiomegaly} + \text{Effusion} \rightarrow$ Gợi ý **Hội chứng suy tim sung huyết (CHF)**.
-- $\text{Pneumonia} + \text{Consolidation} \rightarrow$ Gợi ý **Viêm phổi thùy đông đặc cấp tính**.
-- $\text{Mass} + \text{Atelectasis} \rightarrow$ Cảnh báo **Khối u phế quản chèn ép gây xẹp phổi**.
-- $\text{Fibrosis} + \text{Pleural Thickening} \rightarrow$ Gợi ý **Tổn thương di chứng màng phổi - xơ hóa mạn tính**.
+- **Cardiomegaly + Effusion** → Gợi ý **Hội chứng suy tim sung huyết (CHF)**.
+- **Pneumonia + Consolidation** → Gợi ý **Viêm phổi thùy đông đặc cấp tính**.
+- **Mass + Atelectasis** → Cảnh báo **Khối u phế quản chèn ép gây xẹp phổi**.
+- **Fibrosis + Pleural Thickening** → Gợi ý **Tổn thương di chứng màng phổi - xơ hóa mạn tính**.
 
 #### C. Hệ Thống Tra Cứu Ca Tương Tự CBIR (Dynamic Incremental Indexing)
 - **Vector biểu diễn**: Vector 1536 chiều trích xuất từ tầng GAP của mô hình hybrid, được chuẩn hóa $\ell_2$.
