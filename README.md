@@ -318,28 +318,83 @@ flowchart TB
 
 ### 7. Luồng Hoạt Động Quá Trình Huấn Luyện (Training Pipelines)
 
-#### A. Quá Trình Huấn Luyện Model Hybrid
+#### A. Quá Trình Huấn Luyện Model Hybrid (CheXNet Hybrid Training Pipeline)
 
-Quy trình huấn luyện mạng phân loại cốt lõi CheXNet Hybrid (ConvNeXtV2 + SwinV2) trên tập dữ liệu NIH ChestX-ray 14:
+Quy trình huấn luyện mạng phân loại cốt lõi CheXNet Hybrid (ConvNeXtV2 + SwinV2) được thiết kế theo chiến lược **Huấn luyện Lũy tiến 2 Giai đoạn (Two-Stage Progressive Training)** kết hợp dữ liệu đa nguồn (VinDr-CXR và NIH ChestX-ray 14), tự động cân bằng hàm mất mát đa nhiệm và tối ưu hóa cấp độ phần cứng Tensor Cores:
 
 ```mermaid
 flowchart TB
-    NIH_DS["Tập Dữ Liệu NIH ChestX-ray 14 (112,120 ảnh, 15 nhãn)"] --> DATA_SPLIT["Phân Chia Tập Cấp Bệnh Nhân (Patient-level Split)<br/>Train (70%) • Val (10%) • Test (20%)"]
+    DS_IN["Dữ Liệu Đa Nguồn (VinDr-CXR 18K ảnh có BBox + NIH 14 112K ảnh)"] --> CSV_GROUP["Gộp Nhóm Theo Image Index (read_data.py)<br/>• Phép toán OR đa bác sĩ cho 15 nhãn bệnh<br/>• Trích xuất Ground-Truth Bounding Box theo từng bệnh riêng biệt"]
 
-    DATA_SPLIT --> AUG_PIPE["Data Augmentation & Tiền Xử Lý<br/>Random Flip, Xoay ±10°, CLAHE, Resize 384×384 & Normalization"]
+    CSV_GROUP --> RAM_CACHE["Preload Dữ Liệu Vào RAM Dưới Dạng Byte Thô (bytes_cache)<br/>ThreadPoolExecutor đa luồng, triệt tiêu nghẽn I/O đĩa"]
 
-    AUG_PIPE --> MODEL_BUILD["Khởi Tạo Kiến Trúc CheXNet Hybrid<br/>• Backbone ConvNeXtV2 & SwinV2 (Pretrained ImageNet-22k)<br/>• Khởi tạo FPN Decoder, 15-Channel Attention Head & Gating α"]
+    RAM_CACHE --> TC_PROBE["Phân Tích Phần Cứng Tự Động (config.py - TensorCoreConfig)<br/>• Ampere+ (cc ≥ 8.0) ➜ BF16 | Turing/Volta (cc 7.x) ➜ FP16 + GradScaler<br/>• Tính toán Batch Size bội số của 8 tối ưu cho Tensor Cores"]
 
-    MODEL_BUILD --> TRAIN_FORWARD["Lan Truyền Tiến (Forward Pass)<br/>Tự động bật Mixed Precision (AMP fp16) & Gradient Checkpointing"]
+    TC_PROBE --> ARCH_INIT["Khởi Tạo Kiến Trúc CheXNet Hybrid (Model.py)<br/>• Backbone Kép: ConvNeXtV2 (Cục bộ) + SwinV2 (Toàn cục)<br/>• FPN Multi-Scale Decoder + 15-Channel Spatial Attention Head<br/>• Residual Channel Gating α (trần 0.8) & Gradient Checkpointing"]
 
-    TRAIN_FORWARD --> LOSS_EVAL["Tính Toán Hàm Mất Mát Đa Mục Tiêu<br/>• Loss Phân Loại: Weighted Multi-label BCE / Asymmetric Loss<br/>• Loss Chú Ý: Regularization Loss chống sụp đổ bản đồ nhiệt<br/>➜ Loss_Total = Loss_cls + λ · Loss_att"]
+    ARCH_INIT --> STAGE_1["Giai Đoạn 1: Khởi Động Vùng Chú Ý (Chỉ dùng VinDr-CXR có BBox)<br/>• Augmentation hình học đồng bộ 18 kênh (3 kênh ảnh + 15 kênh mask)<br/>• Multi-channel Focal Tversky Dice Loss (β=0.7 > α=0.3 phạt nặng bỏ sót)<br/>• Asymmetric Loss (ASL) + Sparsity Regularization (weight = 0.1)"]
 
-    LOSS_EVAL --> OPTIM_BACKWARD["Lan Truyền Ngược & Cập Nhật Trọng Số<br/>• GradScaler chống hiện tượng Underflow FP16<br/>• Optimizer: AdamW (Weight Decay 1e-2)<br/>• Scheduler: Cosine Annealing Learning Rate"]
+    STAGE_1 --> S1_CHECK{"Kiểm Tra Điều Kiện Chuyển Giai Đoạn (2 Epoch Liên Tiếp)<br/>Dice Loss < 0.65 VÀ Validation AUROC > 0.68 ?"}
 
-    OPTIM_BACKWARD --> VAL_CHECK["Đánh Giá Sau Mỗi Epoch trên Tập Validation<br/>• Tính Mean AUROC & PR-AUC trên toàn bộ 15 lớp bệnh<br/>• Xác định ngưỡng phân lớp tối ưu Thr* theo chỉ số Youden's J"]
+    S1_CHECK --> STAGE_2["Giai Đoạn 2: Huấn Luyện Toàn Diện (Toàn Bộ VinDr + NIH)<br/>• HybridBatchSampler: Tỷ lệ cố định 1:3 (25% VinDr BBox + 75% NIH)<br/>• Bổ sung Color Augmentation (ColorJitter + Blur) chỉ trên 3 kênh ảnh<br/>• Duy trì định vị tổn thương và tối đa hóa độ bao phủ bệnh lý"]
 
-    VAL_CHECK --> SAVE_MODEL["Lưu Trọng Số Xuất Sắc Nhất (Early Stopping)<br/>➜ Lưu file trọng số: hybrid_model.pth"]
+    STAGE_2 --> LOSS_OPT["Hàm Mất Mát Đa Nhiệm Tự Cân Bằng (TrainModel.py)<br/>• Uncertainty Weighting: Tự học phương sai log(σ²) cho ASL và Dice Loss<br/>• No Finding Consistency Penalty: Phạt dự đoán mâu thuẫn bệnh vs bình thường<br/>• Sparsity Regularization (weight = 0.05) chống sụp đổ bản đồ chú ý"]
+
+    LOSS_OPT --> OPTIM_STEP["Bộ Tối Ưu Hóa Tách Tốc Độ Học (Discriminative AdamW)<br/>• Backbone: LR = 1e-4 (Bảo toàn biểu diễn nền tảng)<br/>• Attention Head & FPN: LR = 5e-4 (Học định vị nhanh)<br/>• Linear Warmup 3 Epochs + Cosine Annealing Learning Rate"]
+
+    OPTIM_STEP --> EMA_STEP["Cập Nhật Trọng Số Shadow Mượt Mà (Model EMA)<br/>• Exponential Moving Average (Decay = 0.999) cho weights & BatchNorm buffers<br/>• Gradient Clipping (max_norm = 1.0) chống bùng nổ gradient"]
+
+    EMA_STEP --> VAL_EVAL["Đánh Giá Validation Cuối Mỗi Epoch (EMA + TTA)<br/>• Test-Time Augmentation: Trung bình xác suất ảnh gốc + ảnh lật ngang<br/>• Đo Mean AUROC & PR-AUC trên 15 lớp bệnh lý<br/>• Giám sát phân phối Attention Map (mean/std) chống hiện tượng collapse"]
+
+    VAL_EVAL --> CKPT_SAVE["Quản Lý Checkpoint An Toàn 2 Tầng (checkpoint_utils.py)<br/>• state_dict: Lưu trọng số EMA Shadow phục vụ suy luận tối ưu<br/>• training_state_dict: Lưu trọng số gốc phục vụ tiếp tục huấn luyện<br/>• Lưu đầy đủ trạng thái Optimizer, Scheduler, Scaler, Uncertainty Weights"]
+
+    CKPT_SAVE --> SAVE_OUT["Lưu Trọng Số Xuất Sắc Nhất: Trainedmodel/hybrid_model.pth<br/>(Early Stopping: Patience = 10 ở GĐ 1, Patience = 8 ở GĐ 2)"]
 ```
+
+##### 1. Chuẩn Bị & Nạp Dữ Liệu Đa Nguồn (`read_data.py`, `main.py`)
+- **Gộp nhóm giải quyết đa bác sĩ đọc (Multi-Radiologist Aggregation)**: Dữ liệu VinDr-CXR chứa nhiều dòng cho cùng một ảnh do nhiều bác sĩ X-quang gán nhãn độc lập. `DatasetGenerator` nhóm dữ liệu theo `Image Index`:
+  - Nhãn phân loại: Áp dụng phép toán logic `OR` giữa các bác sĩ cho 15 bệnh lý.
+  - Bounding Box: Gom theo từng bệnh riêng biệt thành từ điển tọa độ `{disease_idx: [(x1,y1,x2,y2), ...]}` để sinh nhãn Ground-Truth Mask 15 kênh độc lập.
+- **Preload vào RAM dưới dạng Byte thô (`bytes_cache`)**: Khác với việc nạp ảnh PIL giải nén tốn hàng trăm GB RAM, hệ thống đọc toàn bộ ảnh vào RAM dưới dạng nhị phân thô bằng `ThreadPoolExecutor` đa luồng, giải nén theo luồng `io.BytesIO` khi gọi `__getitem__`. Tốc độ nạp dữ liệu tăng hơn 500% mà không bị nghẽn I/O đĩa cứng qua các epoch.
+- **Data Augmentation đồng bộ 18 kênh**: Ghép tensor 3 kênh ảnh và 15 kênh mask thành khối `[18, H, W]`. Mọi phép biến đổi hình học (RandomResizedCrop, RandomHorizontalFlip, RandomRotation ±15°, RandomAffine) được áp dụng đồng thời, bảo đảm Bounding Box mask luôn khớp chuẩn xác với vùng giải phẫu của ảnh sau biến đổi.
+
+##### 2. Tối Ưu Hóa Phần Cứng & Khởi Tạo Mô Hình (`config.py`, `Model.py`)
+- **TensorCoreConfig**: Tự động nhận diện GPU và Compute Capability:
+  - Nếu GPU hỗ trợ Ampere trở lên (Compute Capability ≥ 8.0, như RTX 30-series, A100, H100): Kích hoạt chế độ `torch.bfloat16` (không cần loss scaling do dải số động tương đương FP32).
+  - Nếu GPU là Turing/Volta (Compute Capability 7.x, như T4, RTX 20-series): Kích hoạt `torch.float16` kết hợp `torch.amp.GradScaler`.
+  - Tự động tính toán Batch Size tối ưu làm tròn về bội số của 8 để kích hoạt toàn diện lõi phần cứng Tensor Cores.
+- **Khởi tạo kiến trúc**: Nạp cặp backbone ConvNeXtV2 và SwinV2 khởi tạo từ ImageNet-22k. Kích hoạt **Gradient Checkpointing** trên cả nhánh CNN và SwinV2 đối với bản Large, giúp giảm 60% bộ nhớ kích hoạt (activations), cho phép chạy trơn tru ảnh độ phân giải cao 384×384 trên GPU thương mại.
+
+##### 3. Chiến Lược Huấn Luyện Lũy Tiến 2 Giai Đoạn (`TrainModel.py`, `visualize.py`)
+- **Giai đoạn 1 — Khởi Động Vùng Chú Ý (Warm-up Attention với VinDr-CXR)**:
+  - Chỉ lọc tập con ảnh VinDr-CXR có Bounding Box thực tế (`vin_subset_train`).
+  - Mục tiêu: Ép 15 Attention Heads học nhận biết chính xác cấu trúc hình thái và khoanh đúng vị trí giải phẫu của từng bệnh lý, ngăn ngừa hiện tượng phân tán vùng chú ý.
+  - Điều kiện chuyển giai đoạn: Tự động chuyển sang Giai đoạn 2 khi `Dice Loss < 0.65` và `Validation AUROC > 0.68` được duy trì ổn định trong **2 epoch liên tiếp** (`stage1_streak >= 2`).
+- **Giai đoạn 2 — Huấn Luyện Toàn Diện (VinDr-CXR + NIH ChestX-ray 14)**:
+  - Sử dụng `HybridBatchSampler`: Phân bổ cố định tỷ lệ **1:3** trong mỗi batch (25% ảnh VinDr có BBox và 75% ảnh NIH quy mô lớn).
+  - Bổ sung `Color Augmentation` (`ColorJitter` độ sáng/tương phản 0.15, `GaussianBlur`) qua wrapper `ImageOnlyTransform` (chỉ tác động lên 3 kênh ảnh, giữ nguyên 15 kênh mask) nhằm chống hiện tượng ghi nhớ mẫu (overfitting).
+  - Duy trì khả năng định vị tổn thương nhờ 25% mẫu VinDr, đồng thời mở rộng năng lực phân loại tổng quát trên 112,000 ảnh NIH.
+
+##### 4. Hàm Mất Mát Đa Nhiệm Tự Cân Bằng (Multi-Task Loss Formulation)
+Hệ thống kết hợp 5 thành phần mất mát bổ trợ chặt chẽ:
+1. **Asymmetric Loss (ASL - ICCV 2021)**: Thay thế BCEWithLogitsLoss truyền thống. Sử dụng kỹ thuật dịch chuyển xác suất (Probability Shifting với `clip = 0.05`) triệt tiêu gradient của các ca âm tính dễ (True Negative), kết hợp tiêu điểm bất đối xứng (γ_neg = 4, γ_pos = 0) ép mô hình dồn 100% tài nguyên vào các ca dương tính thực sự và các bệnh lý hiếm gặp (tỷ lệ dương < 5%).
+2. **Multi-Channel Focal Tversky Dice Loss**: Đo độ tương đồng giữa 15 kênh attention maps và ground-truth masks của các mẫu VinDr. Áp dụng β = 0.7 > α = 0.3 nhằm phạt nặng lỗi bỏ sót tổn thương (False Negative) so với khoanh nhầm (False Positive). Tham số tiêu điểm γ = 0.75 kéo dãn gradient tại các vùng tổn thương chưa được định vị chuẩn xác.
+3. **Attention Sparsity & Entropy Regularization**: Áp dụng cho **100% ảnh trong batch** (kể cả ảnh không có BBox). Thành phần L1 regularization phạt giá trị kích hoạt trung bình (ép các vùng phổi bình thường về 0), kết hợp Binary Entropy ép phân cực điểm ảnh về sát 0 hoặc sát 1 (giúp viền bờ tổn thương sắc nét, dễ quan sát).
+4. **No Finding Consistency Penalty**: Phạt khi mô hình đồng thời dự đoán xác suất P(No Finding) cao và xác suất cực đại của các bệnh lý max P(Diseases) cũng cao: `0.1 × mean(P_no_finding × P_max_disease)`.
+5. **Uncertainty Weighting (Kendall & Gal 2018)**: Tự động học phương sai bất định nhiệm vụ log(σ²) cho ASL và Dice Loss, với cơ chế kẹp giới hạn `clamp[-4.0, 4.0]` chống hiện tượng mất kiểm soát gradient.
+
+##### 5. Tối Ưu Hóa Nâng Cao & Quản Lý Checkpoint An Toàn (`TrainModel.py`, `checkpoint_utils.py`)
+- **Tách tốc độ học (Discriminative Learning Rate)**: 
+  - Backbone ConvNeXtV2 và SwinV2: Đặt LR = 1e-4 với AdamW để bảo toàn tri thức biểu diễn sâu đã học.
+  - Các module kiến trúc mới (15-Channel Attention Head, FPN lateral/merge): Đặt LR = 5e-4 để nhanh chóng thích nghi và hội tụ.
+  - Bộ điều phối Learning Rate: Linear Warmup trong 3 epoch đầu tiên, sau đó suy giảm theo hàm Cosine Annealing đến `1e-6`.
+- **Model EMA (Exponential Moving Average, decay = 0.999)**: Duy trì một bản sao trọng số "shadow" làm phẳng các dao động ngẫu nhiên của gradient. Cập nhật cho cả tham số mô hình lẫn bộ đệm BatchNorm (`running_mean`, `running_var`).
+- **Validation với TTA (Test-Time Augmentation)**: Khi đánh giá trên tập Validation, mỗi ảnh được đưa qua mô hình 2 lần (ảnh gốc và ảnh lật ngang), lấy trung bình xác suất đầu ra sau Sigmoid, nâng cao chỉ số Mean AUROC từ 0.3% đến 0.5%.
+- **Quản lý Checkpoint an toàn 2 tầng (`load_checkpoint_safe`)**:
+  - `state_dict`: Lưu trọng số làm mịn EMA (dành riêng cho quá trình suy luận, kiểm thử và triển khai Web).
+  - `training_state_dict`: Lưu trọng số huấn luyện gốc (bảo toàn trọn vẹn động lượng và trạng thái mô hình phục vụ tiếp tục huấn luyện nếu cần).
+  - Lưu trữ đầy đủ trạng thái của Optimizer, Scheduler, Scaler, và Uncertainty Weighting.
+- **Giám sát độ lệch chuẩn Attention Map & Đồ thị tiến trình (`visualize.py`)**: Theo dõi trung bình và độ lệch chuẩn (mean, std) của Attention Map sau mỗi epoch. Nếu std < 0.05, hệ thống tự động phát cảnh báo nguy cơ sụp đổ bản đồ chú ý. Hàm `plot_training_progress` kết xuất 3 đồ thị trực quan (BCE Loss, Dice Loss, AUROC kèm mốc chuyển giai đoạn 0.68).
 
 #### B. Quá Trình Huấn Luyện Model YOLO11m
 
