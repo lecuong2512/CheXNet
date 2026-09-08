@@ -40,11 +40,11 @@
    - **ConvNeXtV2-Large**: Nắm bắt đặc trưng chi tiết cục bộ đa tầng (Local Textures, viền bờ tổn thương).
    - **SwinV2-Large**: Khai thác ngữ cảnh giải phẫu toàn cục (Global Context, đối xứng hai phế trường).
    - **FPN Decoder & 15-Channel Attention Head**: Hòa trộn đặc trưng đa tỷ lệ, cung cấp 15 bản đồ nhiệt phân giải cao độc lập cho từng bệnh.
-   - **Per-Class Channel Gating**: $\mathbf{F}'_k = \mathbf{F}_k + \alpha \cdot (\mathbf{F}_k \odot \mathbf{M}_k)$ định hướng đặc trưng theo vùng chú ý.
+   - **Per-Class Channel Gating**: `F'_k = F_k + α · (F_k ⊙ M_k)` định hướng đặc trưng theo vùng chú ý.
 
 2. **Hợp Nhất Đa Mô Hình (Classifier + Detector)**:
    - Chạy song song CheXNet Classifier và **YOLO11m** Object Detector trên cùng một luồng GPU.
-   - **Cascade 2-Stage Filter**: $\text{Score}_{\text{Cascade}} = P_{\text{CheXNet}}(\text{disease}) \times \text{Conf}_{\text{YOLO}}(\text{box})$, triệt tiêu trên 90% False Positives.
+   - **Cascade 2-Stage Filter**: `Score_Cascade = P_CheXNet(disease) × Conf_YOLO(box)`, triệt tiêu trên 90% False Positives.
    - **Display Fusion**: Heatmap chỉ hiển thị bên trong Bounding Box của YOLO, viền xanh liền nét (tin cậy cao). Khi không có BBox, hệ thống tự động fallback sang Heatmap toàn ảnh viền cam đứt nét.
 
 3. **Trí Tuệ Lâm Sàng Toàn Diện**:
@@ -69,72 +69,24 @@ Hệ thống **CheXNet Pro AI** được thiết kế theo mô hình kiến trú
 Sơ đồ thể hiện chi tiết luồng xử lý từ ảnh X-quang đầu vào, qua các tầng trích xuất đặc trưng với kích thước tensor cụ thể, khối hòa trộn FPN, cổng gating, hợp nhất suy luận đa mô hình cho đến giao diện web:
 
 ```mermaid
-flowchart TD
-    %% ================= GLOBAL STYLING =================
-    classDef inputStyle fill:#E1F5FE,stroke:#0288D1,stroke-width:2px,color:#01579B,font-weight:bold;
-    classDef modelStyle fill:#EDE7F6,stroke:#5E35B1,stroke-width:2px,color:#311B92;
-    classDef fusionStyle fill:#FFF3E0,stroke:#FB8C00,stroke-width:2px,color:#E65100,font-weight:bold;
-    classDef clinicalStyle fill:#E8F5E9,stroke:#43A047,stroke-width:2px,color:#1B5E20;
-    classDef uiStyle fill:#FCE4EC,stroke:#D81B60,stroke-width:2px,color:#880E4F,font-weight:bold;
+graph TB
+    IN[Ảnh X-Quang Ngực Thẳng] --> CHEX[CheXNet Classifier<br/>ConvNeXtV2 + SwinV2]
+    IN --> YOLO[YOLO11m Detector<br/>Định vị Bounding Box]
+    IN --> OTSU[Phân Vùng Phổi<br/>CLAHE + Otsu]
 
-    %% ================= 1. INPUT =================
-    INPUT["🖼️ <b>ẢNH X-QUANG ĐẦU VÀO</b><br/>(DICOM / PNG / JPEG)"]:::inputStyle
+    CHEX -->|Xác suất P_cls| CASCADE[Cascade 2-Stage Filter<br/>Score = P_cls × Conf_YOLO]
+    YOLO -->|Độ tin cậy Conf_YOLO| CASCADE
 
-    %% ================= 2. PARALLEL PROCESSING =================
-    subgraph PHASE1 ["🧠 BƯỚC 1: XỬ LÝ SONG SONG TRÊN GPU (VRAM ~1.21 GB)"]
-        direction LR
-        CHEX["<b>1. CheXNet Hybrid (384×384)</b><br/>• ConvNeXtV2-Large (Đặc trưng cục bộ)<br/>• SwinV2-Large (Ngữ cảnh toàn cục)<br/>• FPN Decoder + 15 Attention Heads<br/>• Gated Residual Attention (α ≤ 0.8)<br/><i>➜ 15 P_cls, 15 Heatmaps M_k, Vector 1536d</i>"]:::modelStyle
-        YOLO["<b>2. YOLO11m Detector (1024×1024)</b><br/>• Backbone C3k2 + SPPF + C2PSA<br/>• Decoupled Anchor-Free Head<br/><i>➜ Tọa độ Bounding Box [x1,y1,x2,y2]<br/>➜ Độ tin cậy phát hiện Conf_YOLO</i>"]:::modelStyle
-        LUNG["<b>3. Định Vị Phổi Cổ Điển</b><br/>• Cân bằng CLAHE + Gaussian Blur<br/>• Phân đoạn Otsu Thresholding (15ms)<br/><i>➜ 6 Vùng giải phẫu lồng ngực</i>"]:::modelStyle
-    end
+    CHEX -->|Attention Heatmap| FUSION[Display Fusion<br/>Heatmap trong BBox]
+    YOLO -->|Tọa độ Bounding Box| FUSION
 
-    %% ================= 3. MULTI-MODEL FUSION =================
-    subgraph PHASE2 ["⚡ BƯỚC 2: HỢP NHẤT SUY LUẬN ĐA MÔ HÌNH (FUSION ENGINE)"]
-        direction LR
-        CASCADE["<b>Cascade 2-Stage Filter</b><br/>Score = P_cls × Conf_YOLO<br/><i>Triệt tiêu hơn 90% Dương Tính Giả (False Positives)</i>"]:::fusionStyle
-        DISPLAY["<b>Cơ Chế Trực Quan Hóa Display Fusion</b><br/>Bản đồ nhiệt Heatmap được cắt khớp bên trong Bounding Box<br/><i>Viền xanh liền nét (Tin cậy cao) | Viền cam nét đứt (Tham khảo)</i>"]:::fusionStyle
-    end
+    CASCADE --> CLINICAL[Khối Trí Tuệ Lâm Sàng<br/>Ma trận 15×15 • FAISS CBIR • Gemini AI]
+    OTSU --> CLINICAL
+    CHEX -.->|Vector 1536d| CLINICAL
 
-    %% ================= 4. CLINICAL INTELLIGENCE =================
-    subgraph PHASE3 ["⚕️ BƯỚC 3: TRÍ TUỆ LÂM SÀNG VÀ CHẨN ĐOÁN HỖ TRỢ"]
-        direction LR
-        COOC["<b>Ma Trận Tương Quan 15×15</b><br/>Phát hiện Hội chứng kết hợp<br/><i>(Suy tim sung huyết, Viêm phổi thùy,...)</i>"]:::clinicalStyle
-        CBIR["<b>FAISS IndexFlatIP (1536-dim)</b><br/>Truy vấn Ca bệnh tương tự từ CSDL<br/><i>Cơ chế tự học liên tục (Dynamic Growth)</i>"]:::clinicalStyle
-        LLM["<b>Google Gemini 2.5 Flash</b><br/>Sinh Báo Cáo Lâm Sàng Chuẩn Hóa<br/><i>Gợi ý chẩn đoán và hướng xử trí y khoa</i>"]:::clinicalStyle
-    end
-
-    %% ================= 5. SERVING & UI =================
-    subgraph PHASE4 ["🌐 BƯỚC 4: HỆ THỐNG PHỤC VỤ VÀ GIAO DIỆN BÁC SĨ"]
-        direction LR
-        API["<b>FastAPI Server (Port 8000)</b><br/>Xử lý Bất đồng bộ (Async) • Nạp mô hình phân tầng"]:::uiStyle
-        WEB["<b>Dashboard Web Bác Sĩ (Port 5173)</b><br/>Viewer Ảnh Kép • BBox Overlay • Báo Cáo Tương Tác"]:::uiStyle
-        API --> WEB
-    end
-
-    %% ================= DATA FLOW CONNECTIONS =================
-    INPUT ==> CHEX
-    INPUT ==> YOLO
-    INPUT ==> LUNG
-
-    CHEX ==> CASCADE
-    YOLO ==> CASCADE
-
-    CHEX ==> DISPLAY
-    YOLO ==> DISPLAY
-
-    CASCADE --> COOC
-    LUNG --> COOC
-
-    CHEX -. Trích xuất Vector 1536d .-> CBIR
-
-    CASCADE --> LLM
-    COOC --> LLM
-    LUNG --> LLM
-
-    CASCADE ==> API
-    DISPLAY ==> API
-    CBIR ==> API
-    LLM ==> API
+    CASCADE --> WEB[Web Dashboard<br/>FastAPI + React 18]
+    FUSION --> WEB
+    CLINICAL --> WEB
 ```
 
 ---
@@ -231,7 +183,11 @@ Nhánh định vị chạy song song mô hình **YOLO11m** (Ultralytics) đượ
 
 #### A. Bộ Lọc Phân Tầng Cascade 2-Stage
 Các mô hình phân loại toàn cục thường dễ mắc lỗi dương tính giả (False Positives) do các bóng mờ sinh lý hoặc thiết bị y tế (dây đo, máy tạo nhịp). Ngược lại, detector cục bộ dễ bị nhiễu nền nếu không có ngữ cảnh tổng quát. Hệ thống áp dụng công thức xác suất liên hợp:
-$$\text{Score}_{\text{Cascade}}(c) = P_{\text{CheXNet}}(c) \times \text{Conf}_{\text{YOLO}}(c)$$
+
+```text
+Score_Cascade(c) = P_CheXNet(c) × Conf_YOLO(c)
+```
+
 Hệ thống thiết lập các ngưỡng phân tầng theo mức độ ưu tiên lâm sàng:
 - **Nguy kịch (Critical)** (*Pneumothorax, Pneumonia*): Ngưỡng cắt **0.05** → Tối đa hóa Recall nhằm không bỏ sót ca cấp cứu đe dọa tính mạng.
 - **Nguy cơ cao (High)** (*Cardiomegaly, Effusion*): Ngưỡng cắt **0.10**.
@@ -240,10 +196,13 @@ Hệ thống thiết lập các ngưỡng phân tầng theo mức độ ưu tiê
 
 #### B. Cơ Chế Trực Quan Hóa Display Fusion
 Một vấn đề lớn trong các hệ thống CADx truyền thống là sự xung đột thị giác giữa Attention Heatmap (thường lan tỏa rộng) và Bounding Box (khu trú gọn). **Display Fusion** chuẩn hóa trải nghiệm:
-- Khi YOLO phát hiện Bounding Box $\mathbf{B}$:
-  $$\text{Heatmap}_{\text{display}}(x, y) = \begin{cases} \mathbf{M}_k(x, y) & \text{nếu } (x, y) \in \mathbf{B} \\ 0 & \text{nếu } (x, y) \notin \mathbf{B} \end{cases}$$
+- **Khi YOLO phát hiện Bounding Box (B)**:
+  Heatmap chú ý được cắt khớp theo phạm vi hình học của Bounding Box, triệt tiêu tín hiệu lan tỏa ngoài vùng tổn thương:
+  ```text
+  Heatmap_display(x, y) = M_k(x, y) nếu (x, y) thuộc Bounding Box, ngược lại = 0
+  ```
   Vẽ khung viền xanh lá đậm nét (High-Confidence Boundary) kèm nhãn bệnh lý và điểm Cascade.
-- Khi YOLO không tìm thấy Bounding Box: Hệ thống chuyển sang chế độ dự phòng (Fallback), phủ Heatmap toàn ảnh và tự động áp dụng phân ngưỡng thích nghi Otsu để tạo khung đứt nét màu cam (Advisory Reference Boundary).
+- **Khi YOLO không tìm thấy Bounding Box**: Hệ thống chuyển sang chế độ dự phòng (Fallback), phủ Heatmap toàn ảnh và tự động áp dụng phân ngưỡng thích nghi Otsu để tạo khung đứt nét màu cam (Advisory Reference Boundary).
 
 ---
 
