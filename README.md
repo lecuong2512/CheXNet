@@ -13,11 +13,15 @@
 ## 📑 Mục Lục
 - [🌟 Tính Năng Nổi Bật](#-tính-năng-nổi-bật)
 - [🏗️ Kiến Trúc Hệ Thống Chi Tiết](#️-kiến-trúc-hệ-thống-chi-tiết)
-  - [1. Sơ đồ Luồng Hoạt Động Toàn Diện (End-to-End Pipeline)](#1-sơ-đồ-luồng-hoạt-động-toàn-diện-end-to-end-pipeline)
-  - [2. Bộ Phân Loại Toàn Cục Hybrid CNN-ViT (ConvNeXtV2 + SwinV2)](#2-bộ-phân-loại-toàn-cục-hybrid-cnn-vit-convnextv2--swinv2)
-  - [3. Bộ Định Vị Tổn Thương YOLO11m (Object Detection)](#3-bộ-định-vị-tổn-thương-yolo11m-object-detection)
+  - [1. Sơ đồ Tổng Quan Toàn Bộ Dự Án (End-to-End System Overview)](#1-sơ-đồ-tổng-quan-toàn-bộ-dự-án-end-to-end-system-overview)
+  - [2. Chi Tiết Cách Làm Việc Của Model Hybrid (ConvNeXtV2 + SwinV2)](#2-chi-tiết-cách-làm-việc-của-model-hybrid-convnextv2--swinv2)
+  - [3. Chi Tiết Cách Làm Việc Của Model YOLO (YOLO11m Lesion Detector)](#3-chi-tiết-cách-làm-việc-của-model-yolo-yolo11m-lesion-detector)
   - [4. Cơ Chế Hợp Nhất Đa Mô Hình (Cascade & Display Fusion)](#4-cơ-chế-hợp-nhất-đa-mô-hình-cascade--display-fusion)
   - [5. Khối Trí Tuệ Lâm Sàng & Phân Tích Chuyên Sâu](#5-khối-trí-tuệ-lâm-sàng--phân-tích-chuyên-sâu)
+  - [6. Chi Tiết Cách Vận Hành Của Hệ Thống Web (Full-Stack Serving)](#6-chi-tiết-cách-vận-hành-của-hệ-thống-web-full-stack-serving)
+  - [7. Luồng Hoạt Động Quá Trình Huấn Luyện (Training Pipelines)](#7-luồng-hoạt-động-quá-trình-huấn-luyện-training-pipelines)
+    - [A. Quá Trình Huấn Luyện Model Hybrid](#a-quá-trình-huấn-luyện-model-hybrid)
+    - [B. Quá Trình Huấn Luyện Model YOLO11m](#b-quá-trình-huấn-luyện-model-yolo11m)
 - [💻 Công Nghệ Sử Dụng Trong Dự Án](#-công-nghệ-sử-dụng-trong-dự-án)
 - [📂 Cấu Trúc Thư Mục Dự Án](#-cấu-trúc-thư-mục-dự-án)
 - [🔬 Đột Phá Kỹ Thuật & Tối Ưu Hóa Bộ Nhớ](#-đột-phá-kỹ-thuật--tối-ưu-hóa-bộ-nhớ)
@@ -64,36 +68,90 @@ Hệ thống **CheXNet Pro AI** được thiết kế theo mô hình kiến trú
 
 ---
 
-### 1. Sơ đồ Luồng Hoạt Động Toàn Diện (End-to-End Pipeline)
+### 1. Sơ đồ Tổng Quan Toàn Bộ Dự Án (End-to-End System Overview)
 
-Sơ đồ thể hiện chi tiết luồng xử lý từ ảnh X-quang đầu vào, qua các tầng trích xuất đặc trưng với kích thước tensor cụ thể, khối hòa trộn FPN, cổng gating, hợp nhất suy luận đa mô hình cho đến giao diện web:
+Sơ đồ thể hiện luồng xử lý toàn diện từ lúc nhận ảnh X-quang đầu vào, qua 3 khối xử lý song song trên GPU, khối hợp nhất suy luận Cascade & Display Fusion, khối trí tuệ lâm sàng hỗ trợ ra quyết định và trả về giao diện Dashboard:
 
 ```mermaid
-graph TB
-    IN[Ảnh X-Quang Ngực Thẳng] --> CHEX[CheXNet Classifier<br/>ConvNeXtV2 + SwinV2]
-    IN --> YOLO[YOLO11m Detector<br/>Định vị Bounding Box]
-    IN --> OTSU[Phân Vùng Phổi<br/>CLAHE + Otsu]
+flowchart TB
+    IN["Ảnh X-Quang Ngực Thẳng<br/>(DICOM / PNG / JPEG)"]
+    
+    subgraph INFERENCE["XỬ LÝ ĐA MÔ HÌNH TRÊN GPU (~1.21 GB VRAM)"]
+        CHEX["CheXNet Hybrid<br/>(ConvNeXtV2 + SwinV2)"]
+        YOLO["YOLO11m Detector<br/>(C3k2 + SPPF + C2PSA)"]
+        OTSU["Phân Vùng Phổi Cổ Điển<br/>(CLAHE + Otsu)"]
+    end
 
-    CHEX -->|Xác suất P_cls| CASCADE[Cascade 2-Stage Filter<br/>Score = P_cls × Conf_YOLO]
-    YOLO -->|Độ tin cậy Conf_YOLO| CASCADE
+    subgraph FUSION["HỢP NHẤT SUY LUẬN"]
+        CASCADE["Cascade 2-Stage Filter<br/>Score = P_cls × Conf_YOLO"]
+        DISPLAY["Display Fusion Engine<br/>Heatmap ⊂ Bounding Box"]
+    end
 
-    CHEX -->|Attention Heatmap| FUSION[Display Fusion<br/>Heatmap trong BBox]
-    YOLO -->|Tọa độ Bounding Box| FUSION
+    subgraph CLINICAL["TRÍ TUỆ LÂM SÀNG"]
+        COOC["Ma Trận Đồng Xuất Hiện 15×15<br/>(Hội chứng kết hợp)"]
+        CBIR["FAISS Vector Search (1536d)<br/>(Tra cứu ca tương tự)"]
+        GEMINI["Google Gemini 2.5 Flash<br/>(Báo cáo y khoa tự động)"]
+    end
 
-    CASCADE --> CLINICAL[Khối Trí Tuệ Lâm Sàng<br/>Ma trận 15×15 • FAISS CBIR • Gemini AI]
-    OTSU --> CLINICAL
-    CHEX -.->|Vector 1536d| CLINICAL
+    subgraph SERVING["GIAO DIỆN & PHỤC VỤ"]
+        API["FastAPI Server (Port 8000)"]
+        UI["React 18 Dashboard (Port 5173)"]
+    end
 
-    CASCADE --> WEB[Web Dashboard<br/>FastAPI + React 18]
-    FUSION --> WEB
-    CLINICAL --> WEB
+    IN --> CHEX
+    IN --> YOLO
+    IN --> OTSU
+
+    CHEX -->|Xác suất P_cls| CASCADE
+    YOLO -->|Độ tin cậy BBox| CASCADE
+
+    CHEX -->|Attention Heatmap| DISPLAY
+    YOLO -->|Tọa độ BBox| DISPLAY
+
+    CASCADE --> COOC
+    OTSU --> COOC
+    CHEX -.->|Vector 1536d| CBIR
+    CASCADE --> GEMINI
+    COOC --> GEMINI
+
+    CASCADE --> API
+    DISPLAY --> API
+    CBIR --> API
+    GEMINI --> API
+    API --> UI
 ```
 
 ---
 
-### 2. Bộ Phân Loại Toàn Cục Hybrid CNN-ViT (ConvNeXtV2 + SwinV2)
+### 2. Chi Tiết Cách Làm Việc Của Model Hybrid (ConvNeXtV2 + SwinV2)
 
 Mô hình phân loại cốt lõi kết hợp sức mạnh bổ trợ lẫn nhau giữa **Mạng tích chập thế hệ mới (ConvNeXtV2)** và **Vision Transformer dạng cửa sổ trượt (SwinV2)**:
+
+```mermaid
+flowchart TB
+    IMG["Ảnh X-Quang Đầu Vào<br/>[B, 3, 384, 384]"] --> CNN["ConvNeXtV2-Large Backbone<br/>(Trích xuất đặc trưng cục bộ)"]
+
+    CNN --> S3["Stage-3 Features<br/>[B, 1536, 24, 24]"]
+    CNN --> S4["Stage-4 Features<br/>[B, 1536, 12, 12]"]
+
+    S4 --> SWIN["SwinV2-Large Stage<br/>Shifted Window Self-Attention (SW-MSA)<br/>[B, 1536, 12, 12]"]
+
+    SWIN --> UP["Bilinear Upsample (2×)<br/>[B, 1536, 24, 24]"]
+    S3 --> LAT["Lateral Conv 1×1<br/>[B, 1536, 24, 24]"]
+
+    UP & LAT --> FPN["FPN Merge Conv 3×3 + BN + GELU<br/>[B, 1536, 24, 24]"]
+
+    FPN --> ATT["15-Channel Attention Head<br/>Conv 3×3 ➜ Conv 1×1 ➜ Sigmoid<br/>15 Bản đồ nhiệt M ∈ [B, 15, 24, 24]"]
+
+    ATT --> INTERP["Nội suy về kích thước Coarse<br/>M_coarse ∈ [B, 15, 12, 12]"]
+
+    S4 & INTERP --> GATING["Per-Class Residual Channel Gating<br/>F'_k = F_k + α · (F_k ⊙ M_k) với α ≤ 0.8<br/>[B, 1536, 12, 12]"]
+
+    GATING --> GAP["Global Average Pooling (GAP)"]
+
+    GAP --> EMBED["Vector Nhúng: [B, 1536]<br/>(Dùng cho CBIR FAISS)"]
+    GAP --> CLS["Linear Classifier + Sigmoid<br/>15 Xác suất bệnh P_cls ∈ [0, 1]^15"]
+```
 
 #### A. Nhánh Trích Xuất Cục Bộ — ConvNeXtV2-Large
 - **Vai trò**: Chuyên trách phát hiện các tín hiệu tổn thương dạng hình thái và kết cấu vi mô (Local Textures) như nốt mờ nhỏ, viền xơ hóa, mức khí - dịch màng phổi.
@@ -138,9 +196,29 @@ $$\mathbf{z}_{\text{emb}} = \text{GAP}(\mathbf{F}') \in \mathbb{R}^{B \times 153
 
 ---
 
-### 3. Bộ Định Vị Tổn Thương YOLO11m (Object Detection)
+### 3. Chi Tiết Cách Làm Việc Của Model YOLO (YOLO11m Lesion Detector)
 
 Nhánh định vị chạy song song mô hình **YOLO11m** (Ultralytics) được thiết kế chuyên biệt cho ảnh y tế độ phân giải cao:
+
+```mermaid
+flowchart TB
+    IN_DET["Ảnh X-Quang Độ Phân Giải Cao<br/>[B, 3, 1024, 1024]"] --> BB["Backbone YOLO11m<br/>• Stem Tích chập & Khối C3k2<br/>• SPPF (Spatial Pyramid Pooling Fast)<br/>• C2PSA (Cross Stage Partial Spatial Attention)"]
+
+    BB --> P3["Feature Map P3 (128×128)<br/>Tổn thương vi mô (Nốt mờ Nodule, Vôi hóa)"]
+    BB --> P4["Feature Map P4 (64×64)<br/>Tổn thương trung bình (Thâm nhiễm, Khối u Mass)"]
+    BB --> P5["Feature Map P5 (32×32)<br/>Tổn thương diện rộng (Bóng tim to, Tràn dịch)"]
+
+    P3 & P4 & P5 --> NECK["PAFPN Neck (Path Aggregation Network)<br/>Hòa trộn đặc trưng đa tỷ lệ Top-Down & Bottom-Up"]
+
+    NECK --> HEAD["Decoupled Anchor-Free Detection Head"]
+
+    HEAD --> BOX_BRANCH["Nhánh Hồi Quy Hộp Giới Hạn<br/>Tối ưu hóa DFL + CIoU Loss"]
+    HEAD --> CLS_BRANCH["Nhánh Phân Loại 14 Lớp Bệnh<br/>Đồng bộ 1-1 với CheXNet"]
+
+    BOX_BRANCH & CLS_BRANCH --> FILTER["Hậu Xử Lý & Ràng Buộc Y Khoa<br/>• Lọc ngưỡng tin cậy (Conf Threshold)<br/>• Non-Maximum Suppression (IoU = 0.35)<br/>• Ràng buộc đơn box giải phẫu (Cardiomegaly)"]
+
+    FILTER --> OUT_BOX["Kết Quả Định Vị Tổn Thương<br/>• Tọa độ Bounding Box [x1, y1, x2, y2]<br/>• Nhãn bệnh & Độ tin cậy Conf_YOLO"]
+```
 - **Kích thước đầu vào**: $1024 \times 1024$ pixels, bảo toàn tối đa vi cấu trúc nốt mờ ($\le 3\text{mm}$) và dải màng phổi mỏng.
 - **Quy mô tham số**: $20.1 \times 10^6$ tham số (20.1M), cân bằng hoàn hảo giữa tốc độ suy luận thời gian thực và khả năng định vị tổn thương nhỏ.
 - **Kiến trúc khối cải tiến**:
@@ -233,6 +311,105 @@ Một vấn đề lớn trong các hệ thống CADx truyền thống là sự x
 #### D. Tự Động Sinh Báo Cáo Lâm Sàng & Trợ Lý Gemini 2.5 Flash
 - Bộ sinh báo cáo Tiếng Việt tự động ghép nối các chỉ số phát hiện, tọa độ giải phẫu và kết luận hội chứng thành biên bản chẩn đoán chuẩn Bộ Y tế.
 - Tích hợp **Google Gemini 2.5 Flash API** đóng vai trò trợ lý chuyên khoa: Phân tích cơ chế sinh lý bệnh, cảnh báo biến chứng cấp cứu và đề xuất phác đồ cận lâm sàng tiếp theo (Chụp cắt lớp vi tính CT-Scan độ phân giải cao HRCT, siêu âm màng phổi, khí máu động mạch).
+
+---
+
+### 6. Chi Tiết Cách Vận Hành Của Hệ Thống Web (Full-Stack Serving)
+
+Hệ thống phục vụ người dùng kết hợp giữa giao diện Web React 18 hiện đại và máy chủ FastAPI bất đồng bộ hiệu năng cao:
+
+```mermaid
+flowchart TB
+    subgraph CLIENT["1. TRÌNH DUYỆT BÁC SĨ (REACT 18 + VITE)"]
+        USER["Bác Sĩ / Kỹ Thuật Viên"] --> UPLOAD["Kéo & Thả Ảnh X-quang<br/>(DICOM / PNG / JPEG)"]
+        UPLOAD --> PREVIEW["Xem trước ảnh & Chỉnh slider ngưỡng lọc"]
+        PREVIEW --> API_CALL["Gửi HTTP POST /predict (Multipart Form)"]
+    end
+
+    subgraph SERVER["2. MÁY CHỦ DỊCH VỤ (FASTAPI SERVER)"]
+        API_CALL --> ROUTE["FastAPI Controller (Port 8000)"]
+        ROUTE --> PREPROC["Tiền xử lý ảnh 2 luồng:<br/>• 384×384 (CheXNet)<br/>• 1024×1024 (YOLO)"]
+        PREPROC --> STAGING["CPU Staging & Quản lý bộ nhớ GPU<br/>(Duy trì tải VRAM ~1.21 GB)"]
+    end
+
+    subgraph ENGINE["3. BỘ MÁY XỬ LÝ & TÍCH HỢP"]
+        STAGING --> INFER["Suy Luận Song Song:<br/>• CheXNet Hybrid ➜ P_cls, Heatmaps, Embeddings<br/>• YOLO11m ➜ Bounding Boxes, Conf_YOLO<br/>• Otsu + CLAHE ➜ 6 Vùng giải phẫu phổi"]
+        INFER --> FUSION_OP["Hợp Nhất Đa Mô Hình:<br/>• Cascade Filter: Score = P_cls × Conf_YOLO<br/>• Display Fusion: Heatmap ⊂ Bounding Box"]
+        FUSION_OP --> CBIR_OP["Meta FAISS: Tìm Top-3 ca bệnh tương tự"]
+        FUSION_OP --> GEMINI_OP["Google Gemini AI: Sinh báo cáo phân tích y khoa"]
+    end
+
+    subgraph UI_RENDER["4. TRỰC QUAN HÓA TRÊN DASHBOARD"]
+        FUSION_OP & CBIR_OP & GEMINI_OP --> JSON_DATA["Trả về kết quả JSON"]
+        JSON_DATA --> DASHBOARD["Giao Diện Web Bác Sĩ:<br/>• Dual-Viewer đồng bộ (Ảnh Gốc ⟷ Display Fusion)<br/>• Lớp phủ Bounding Box trực quan tương tác<br/>• Danh sách ca bệnh tương tự kèm hình ảnh<br/>• Báo cáo lâm sàng chuẩn hóa Tiếng Việt"]
+    end
+```
+
+---
+
+### 7. Luồng Hoạt Động Quá Trình Huấn Luyện (Training Pipelines)
+
+#### A. Quá Trình Huấn Luyện Model Hybrid
+
+Quy trình huấn luyện mạng phân loại cốt lõi CheXNet Hybrid (ConvNeXtV2 + SwinV2) trên tập dữ liệu NIH ChestX-ray 14:
+
+```mermaid
+flowchart TB
+    subgraph DATA_PIPELINE["1. DỮ LIỆU & TIỀN XỬ LÝ"]
+        NIH_RAW["Tập Dữ Liệu NIH ChestX-ray 14<br/>(112,120 ảnh X-quang, 15 nhãn)"] --> PATIENT_SPLIT["Phân chia cấp Bệnh nhân (Patient-level Split)<br/>Train (70%) • Val (10%) • Test (20%)"]
+        PATIENT_SPLIT --> AUGMENT["Data Augmentation:<br/>• Random Horizontal Flip (p=0.5)<br/>• Random Affine Rotation (±10°)<br/>• Color Jitter & CLAHE tương phản<br/>• Resize 384×384 & Mean/Std Norm"]
+    end
+
+    subgraph MODEL_SETUP["2. KHỞI TẠO MÔ HÌNH"]
+        CONV_PRE["ConvNeXtV2-Large<br/>(ImageNet-22k Pretrained)"]
+        SWIN_PRE["SwinV2-Large<br/>(ImageNet-22k Pretrained)"]
+        MODULES_INIT["Khởi Tạo Khối Chức Năng:<br/>• FPN Multi-Scale Lateral & Merge<br/>• 15 Attention Heads độc lập<br/>• Tham số Gating α ban đầu"]
+        CONV_PRE & SWIN_PRE & MODULES_INIT --> ASSEMBLE["Lắp Ráp Hoàn Chỉnh CheXNet Hybrid"]
+    end
+
+    subgraph TRAINING_STEP["3. VÒNG LẶP HUẤN LUYỆN TỐI ƯU HÓA"]
+        AUGMENT & ASSEMBLE --> FORWARD_PASS["Lan Truyền Tiến (Forward Pass)<br/>Mixed Precision (AMP fp16) + Gradient Checkpointing"]
+        FORWARD_PASS --> LOSS_CALC["Hàm Mất Mát Kết Hợp:<br/>• Loss Phân Loại: Weighted Multi-label BCE / Asymmetric Loss<br/>• Loss Attention: Regularization Loss ép khu trú tổn thương<br/>➜ Loss_Total = Loss_cls + λ · Loss_att"]
+        LOSS_CALC --> OPTIM_STEP["Lan Truyền Ngược & Tối Ưu:<br/>• GradScaler chống Underflow FP16<br/>• AdamW Optimizer (Weight Decay 1e-2)<br/>• Cosine Annealing Learning Rate Scheduler"]
+    end
+
+    subgraph VALIDATION_CHECKPOINT["4. ĐÁNH GIÁ & LƯU CHECKPOINT"]
+        OPTIM_STEP --> VAL_LOOP["Đánh Giá Hết Mỗi Epoch trên Validation Set:<br/>• Tính Mean AUROC & PR-AUC trên 15 lớp bệnh<br/>• Xác định ngưỡng phân lớp tối ưu Thr* (Youden's J)"]
+        VAL_LOOP --> SAVE_BEST["Early Stopping (Patience = 7)<br/>Lưu Checkpoint Tối Ưu ➜ hybrid_model.pth"]
+    end
+```
+
+#### B. Quá Trình Huấn Luyện Model YOLO11m
+
+Quy trình huấn luyện mạng định vị tổn thương YOLO11m kết hợp dữ liệu VinDr-CXR và nhãn giả chưng cất tri thức (Knowledge Distillation) từ CheXNet Model:
+
+```mermaid
+flowchart TB
+    subgraph DATA_FORMULATION["1. TỔNG HỢP DỮ LIỆU ĐA NGUỒN"]
+        VINDR_DS["Tập VinDr-CXR (18,000 ảnh)<br/>BBox từ nhiều Bác sĩ X-quang"] --> WBF_CONSENSUS["Weighted Boxes Fusion (WBF)<br/>Hợp nhất BBox đồng thuận"]
+        
+        NIH_DS["Tập NIH ChestX-ray 14 (112,120 ảnh)<br/>Nhãn bệnh không có BBox"] --> PSEUDO_DISTILL["Knowledge Distillation:<br/>Dùng Attention Maps từ CheXNet Model<br/>sinh Pseudo BBox cho 4 bệnh thiếu<br/>(Pneumonia, Edema, Emphysema, Hernia)"]
+
+        WBF_CONSENSUS & PSEUDO_DISTILL --> UNIFIED_YOLO["Bộ Dữ Liệu Đồng Bộ 14 Lớp Bệnh<br/>Chuyển sang format YOLO txt: [cls, xc, yc, w, h]"]
+    end
+
+    subgraph MULTI_PHASE["2. HUẤN LUYỆN LŨY TIẾN 2 GIAI ĐOẠN"]
+        UNIFIED_YOLO --> PHASE_640["Giai Đoạn 1: Học Nhanh Ở Độ Phân Giải 640×640<br/>• Khởi tạo pretrained YOLO11m<br/>• Nắm bắt tổn thương lớn (Cardiomegaly, Effusion)<br/>• Augmentation: Mosaic, MixUp, Perspective"]
+        PHASE_640 --> PHASE_1024["Giai Đoạn 2: Tinh Chỉnh Độ Phân Giải Cao 1024×1024<br/>• Tăng kích thước ảnh lên 1024px<br/>• Bắt vi tổn thương nhỏ (Nodule, Calcification, dải màng phổi)<br/>• Giảm Learning Rate + HSV Jitter"]
+    end
+
+    subgraph LOSS_OPTIM["3. HÀM MẤT MÁT & TỐI ƯU HÓA"]
+        PHASE_1024 --> LOSS_DFL_CIOU["Loss Tọa Độ Hộp: Complete IoU (CIoU) + DFL"]
+        PHASE_1024 --> LOSS_BCE["Loss Phân Loại: Binary Cross-Entropy (BCE)"]
+        LOSS_DFL_CIOU & LOSS_BCE --> BACKPROP["Lan Truyền Ngược & Cập Nhật Trọng Số<br/>Optimizer: SGD / AdamW với Cosine LR"]
+    end
+
+    subgraph EVAL_EXPORT["4. ĐÁNH GIÁ & XUẤT MÔ HÌNH"]
+        BACKPROP --> TTA_EVAL["Đánh Giá Kiểm Thử với TTA (Test-Time Augmentation):<br/>Dự đoán ảnh gốc + Ảnh lật ngang + Gộp Box qua WBF"]
+        TTA_EVAL --> MAP_METRICS["Đo lường Chỉ Số: mAP@50, mAP@50-95 trên 14 lớp"]
+        MAP_METRICS --> SAVE_YOLO["Xuất Trọng Số Tối Ưu ➜ yolov11m.pt<br/>(Tích hợp vào luồng Cascade Inference)"]
+    end
+```
 
 ---
 
