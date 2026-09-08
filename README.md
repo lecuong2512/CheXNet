@@ -70,23 +70,21 @@ Hệ thống **CheXNet Pro AI** được thiết kế theo mô hình kiến trú
 
 ### 1. Sơ đồ Tổng Quan Toàn Bộ Dự Án (End-to-End System Overview)
 
-Sơ đồ thể hiện luồng xử lý toàn diện từ lúc nhận ảnh X-quang đầu vào, qua 3 khối xử lý song song trên GPU, khối hợp nhất suy luận Cascade & Display Fusion, khối trí tuệ lâm sàng hỗ trợ ra quyết định và trả về giao diện Dashboard:
+Sơ đồ thể hiện luồng xử lý toàn diện từ lúc nhận ảnh X-quang đầu vào, qua 2 nhánh mô hình bổ trợ (CheXNet Hybrid & YOLO11m Detector), bộ hợp nhất Cascade & Display Fusion, khối trí tuệ lâm sàng hỗ trợ ra quyết định và trả về giao diện Web Dashboard:
 
 ```mermaid
 flowchart TB
-    IN["Ảnh X-Quang Ngực Thẳng (DICOM / PNG / JPEG)"] --> PRE["Tiền Xử Lý & Chuẩn Hóa Đa Kích Thước (384px & 1024px)"]
+    IN["Ảnh X-Quang Ngực Thẳng (Chest X-ray)"] --> PRE["Tiền Xử Lý & Chuẩn Hóa Ảnh"]
 
-    PRE --> CHEX["Nhánh 1: CheXNet Classifier (384×384)<br/>ConvNeXtV2 + SwinV2 ➜ 15 P_cls & Attention Maps"]
-    PRE --> YOLO["Nhánh 2: YOLO11m Detector (1024×1024)<br/>C3k2 + PAFPN ➜ Tọa độ Bounding Boxes & Conf_YOLO"]
-    PRE --> OTSU["Nhánh 3: Phân Vùng Phổi Cổ Điển<br/>CLAHE + Otsu ➜ 6 Phân khu giải phẫu lồng ngực"]
+    PRE --> CHEX["Phân Loại Đa Bệnh Lý (CheXNet Hybrid)<br/>ConvNeXtV2 + SwinV2 ➜ 15 Xác suất bệnh & Attention Maps"]
+    PRE --> YOLO["Định Vị Tổn Thương (YOLO11m Detector)<br/>Tọa độ Bounding Box & Điểm tin cậy"]
 
-    CHEX --> FUSION["Bộ Hợp Nhất Đa Mô Hình<br/>• Cascade 2-Stage Filter: Triệt tiêu >90% False Positives<br/>• Display Fusion: Bản đồ nhiệt Heatmap giới hạn trong BBox"]
+    CHEX --> FUSION["Hợp Nhất Đa Mô Hình (Cascade & Display Fusion)<br/>Lọc False Positives & Lồng ghép Heatmap vào Bounding Box"]
     YOLO --> FUSION
 
-    FUSION --> CLINICAL["Khối Trí Tuệ Lâm Sàng Hỗ Trợ Chẩn Đoán<br/>• Ma trận tương quan 15×15: Phát hiện hội chứng kết hợp (CHF, Viêm đông đặc)<br/>• Meta FAISS: Tìm kiếm ca bệnh tương tự dựa trên Vector 1536d<br/>• Google Gemini 2.5 Flash: Phân tích cơ chế bệnh & Sinh báo cáo y khoa"]
-    OTSU --> CLINICAL
+    FUSION --> CLINICAL["Khối Trí Tuệ Lâm Sàng Hỗ Trợ Chẩn Đoán<br/>Ma trận tương quan bệnh • Tìm ca tương tự (FAISS) • Trợ lý AI (Gemini)"]
 
-    CLINICAL --> WEB["Giao Diện Web Bác Sĩ (FastAPI + React 18 Dashboard)<br/>Viewer ảnh kép đồng bộ, Lớp phủ BBox tương tác & Báo cáo chuẩn Bộ Y tế"]
+    CLINICAL --> WEB["Giao Diện Web Bác Sĩ & Báo Cáo Chẩn Đoán"]
 ```
 
 ---
@@ -94,24 +92,6 @@ flowchart TB
 ### 2. Chi Tiết Cách Làm Việc Của Model Hybrid (ConvNeXtV2 + SwinV2)
 
 Mô hình phân loại cốt lõi kết hợp sức mạnh bổ trợ lẫn nhau giữa **Mạng tích chập thế hệ mới (ConvNeXtV2)** và **Vision Transformer dạng cửa sổ trượt (SwinV2)**:
-
-```mermaid
-flowchart TB
-    IMG["Ảnh X-Quang Đầu Vào: [B, 3, 384, 384]"] --> CNN["Backbone ConvNeXtV2-Large<br/>Trích xuất đặc trưng đa tầng Stage-3 & Stage-4"]
-
-    CNN --> SWIN["SwinV2 Transformer Stage<br/>Khai thác ngữ cảnh toàn cục (SW-MSA) trên Stage-4"]
-
-    SWIN --> FPN["Khối FPN Multi-Scale Decoder<br/>Hòa trộn đặc trưng SwinV2 (Upsample 2×) và CNN Stage-3 (Lateral 1×1)"]
-
-    FPN --> ATT["15-Channel Spatial Attention Head<br/>Sinh 15 bản đồ nhiệt phân giải cao độc lập cho 15 bệnh lý: M ∈ [B, 15, 24, 24]"]
-
-    ATT --> GATING["Per-Class Residual Channel Gating<br/>Định hướng 15 nhóm kênh theo vùng chú ý: F'_k = F_k + α · (F_k ⊙ M_k)"]
-
-    GATING --> GAP["Global Average Pooling (GAP)<br/>Trích xuất đặc trưng toàn cục cấp ảnh"]
-
-    GAP --> OUT_EMB["Vector Nhúng: [B, 1536]<br/>(Chuẩn hóa L2 cho CBIR FAISS)"]
-    GAP --> OUT_CLS["Linear Classifier + Sigmoid<br/>15 Xác suất bệnh P_cls ∈ [0, 1]^15"]
-```
 
 #### A. Nhánh Trích Xuất Cục Bộ — ConvNeXtV2-Large
 - **Vai trò**: Chuyên trách phát hiện các tín hiệu tổn thương dạng hình thái và kết cấu vi mô (Local Textures) như nốt mờ nhỏ, viền xơ hóa, mức khí - dịch màng phổi.
@@ -175,25 +155,6 @@ y_logits = W_cls · z_emb + b ∈ R^[B × 15]   ==>   P_cls = Sigmoid(y_logits)
 
 Nhánh định vị chạy song song mô hình **YOLO11m** (Ultralytics) được thiết kế chuyên biệt cho ảnh y tế độ phân giải cao:
 
-```mermaid
-flowchart TB
-    IN_DET["Ảnh X-Quang Độ Phân Giải Cao<br/>[B, 3, 1024, 1024]"] --> BB["Backbone YOLO11m<br/>• Stem Tích chập & Khối C3k2<br/>• SPPF (Spatial Pyramid Pooling Fast)<br/>• C2PSA (Cross Stage Partial Spatial Attention)"]
-
-    BB --> P3["Feature Map P3 (128×128)<br/>Tổn thương vi mô (Nốt mờ Nodule, Vôi hóa)"]
-    BB --> P4["Feature Map P4 (64×64)<br/>Tổn thương trung bình (Thâm nhiễm, Khối u Mass)"]
-    BB --> P5["Feature Map P5 (32×32)<br/>Tổn thương diện rộng (Bóng tim to, Tràn dịch)"]
-
-    P3 & P4 & P5 --> NECK["PAFPN Neck (Path Aggregation Network)<br/>Hòa trộn đặc trưng đa tỷ lệ Top-Down & Bottom-Up"]
-
-    NECK --> HEAD["Decoupled Anchor-Free Detection Head"]
-
-    HEAD --> BOX_BRANCH["Nhánh Hồi Quy Hộp Giới Hạn<br/>Tối ưu hóa DFL + CIoU Loss"]
-    HEAD --> CLS_BRANCH["Nhánh Phân Loại 14 Lớp Bệnh<br/>Đồng bộ 1-1 với CheXNet"]
-
-    BOX_BRANCH & CLS_BRANCH --> FILTER["Hậu Xử Lý & Ràng Buộc Y Khoa<br/>• Lọc ngưỡng tin cậy (Conf Threshold)<br/>• Non-Maximum Suppression (IoU = 0.35)<br/>• Ràng buộc đơn box giải phẫu (Cardiomegaly)"]
-
-    FILTER --> OUT_BOX["Kết Quả Định Vị Tổn Thương<br/>• Tọa độ Bounding Box [x1, y1, x2, y2]<br/>• Nhãn bệnh & Độ tin cậy Conf_YOLO"]
-```
 - **Kích thước đầu vào**: 1024 × 1024 pixels, bảo toàn tối đa vi cấu trúc nốt mờ (≤ 3mm) và dải màng phổi mỏng.
 - **Quy mô tham số**: 20.1M tham số (20.1 × 10⁶), cân bằng hoàn hảo giữa tốc độ suy luận thời gian thực và khả năng định vị tổn thương nhỏ.
 - **Kiến trúc khối cải tiến**:
@@ -296,23 +257,12 @@ S(u, v) = ∑(u_i · v_i)   (với i = 1 đến 1536)
 ### 6. Chi Tiết Cách Vận Hành Của Hệ Thống Web (Full-Stack Serving)
 
 Hệ thống phục vụ người dùng kết hợp giữa giao diện Web React 18 hiện đại và máy chủ FastAPI bất đồng bộ hiệu năng cao:
+- **Tiếp nhận yêu cầu**: Bác sĩ tải ảnh X-quang lên Dashboard (React 18 + Vite) và gửi qua HTTP POST `/predict`.
+- **Điều phối GPU**: FastAPI Controller tiếp nhận và tiền xử lý ảnh song song ở hai độ phân giải (384px cho CheXNet và 1024px cho YOLO11m) với mức tiêu thụ VRAM chỉ ~1.21 GB.
+- **Hợp nhất suy luận**: Tích hợp bộ lọc Cascade 2 giai đoạn (`Score_Cascade = P_cls × Conf_YOLO`) và Display Fusion đóng khung bản đồ nhiệt.
+- **Phân tích lâm sàng**: Phân tích ma trận tương quan 15×15 phát hiện hội chứng kết hợp, truy vấn ca bệnh tương tự qua FAISS và trợ lý Gemini sinh biên bản chẩn đoán y khoa.
+- **Hiển thị trực quan**: Trả về dữ liệu JSON cho giao diện Dashboard với Viewer ảnh kép đồng bộ và lớp phủ Bounding Box có thể tương tác.
 
-```mermaid
-flowchart TB
-    UI_INPUT["Bác Sĩ Tải Ảnh X-Quang Lên Dashboard (React 18 + Vite)"] --> HTTP_REQ["Gửi HTTP Request: POST /predict (Multipart Form)"]
-
-    HTTP_REQ --> FASTAPI["FastAPI Controller (Port 8000)<br/>Tiếp nhận và tiền xử lý ảnh song song 384px & 1024px"]
-
-    FASTAPI --> GPU_EXEC["Bộ Điều Phối Thực Thi GPU (~1.21 GB VRAM)<br/>• CheXNet Hybrid ➜ 15 P_cls, Heatmaps, Vector 1536d<br/>• YOLO11m ➜ Bounding Boxes [x1,y1,x2,y2], Conf_YOLO<br/>• Otsu & CLAHE ➜ 6 Phân vùng giải phẫu lồng ngực"]
-
-    GPU_EXEC --> FUSION_CORE["Bộ Hợp Nhất Suy Luận<br/>• Cascade Filter: Score = P_cls × Conf_YOLO (Lọc sạch FP)<br/>• Display Fusion: Giới hạn Attention Heatmap trong Bounding Box"]
-
-    FUSION_CORE --> CLINICAL_CORE["Khối Phân Tích Lâm Sàng Tự Động<br/>• Ma trận 15×15: Phát hiện Hội chứng kết hợp (CHF, Viêm đông đặc)<br/>• Meta FAISS: Truy vấn Top-3 ca bệnh tương tự từ vector 1536d<br/>• Google Gemini: Sinh báo cáo y khoa & Đề xuất cận lâm sàng"]
-
-    CLINICAL_CORE --> JSON_OUT["Đóng Gói Kết Quả JSON Trả Về Trình Duyệt"]
-
-    JSON_OUT --> UI_VIEW["Giao Diện Web Dashboard Hiển Thị Trực Quan<br/>• Viewer kép đồng bộ (Ảnh Gốc ⟷ Display Fusion)<br/>• Lớp phủ Bounding Box có thể bật/tắt theo ngưỡng<br/>• Bảng ca bệnh tương tự kèm hình ảnh minh chứng<br/>• Biên bản chẩn đoán lâm sàng Tiếng Việt"]
-```
 
 ---
 
@@ -321,35 +271,6 @@ flowchart TB
 #### A. Quá Trình Huấn Luyện Model Hybrid (CheXNet Hybrid Training Pipeline)
 
 Quy trình huấn luyện mạng phân loại cốt lõi CheXNet Hybrid (ConvNeXtV2 + SwinV2) được thiết kế theo chiến lược **Huấn luyện Lũy tiến 2 Giai đoạn (Two-Stage Progressive Training)** kết hợp dữ liệu đa nguồn (VinDr-CXR và NIH ChestX-ray 14), tự động cân bằng hàm mất mát đa nhiệm và tối ưu hóa cấp độ phần cứng Tensor Cores:
-
-```mermaid
-flowchart TB
-    DS_IN["Dữ Liệu Đa Nguồn (VinDr-CXR 18K ảnh có BBox + NIH 14 112K ảnh)"] --> CSV_GROUP["Gộp Nhóm Theo Image Index (read_data.py)<br/>• Phép toán OR đa bác sĩ cho 15 nhãn bệnh<br/>• Trích xuất Ground-Truth Bounding Box theo từng bệnh riêng biệt"]
-
-    CSV_GROUP --> RAM_CACHE["Preload Dữ Liệu Vào RAM Dưới Dạng Byte Thô (bytes_cache)<br/>ThreadPoolExecutor đa luồng, triệt tiêu nghẽn I/O đĩa"]
-
-    RAM_CACHE --> TC_PROBE["Phân Tích Phần Cứng Tự Động (config.py - TensorCoreConfig)<br/>• Ampere+ (cc ≥ 8.0) ➜ BF16 | Turing/Volta (cc 7.x) ➜ FP16 + GradScaler<br/>• Tính toán Batch Size bội số của 8 tối ưu cho Tensor Cores"]
-
-    TC_PROBE --> ARCH_INIT["Khởi Tạo Kiến Trúc CheXNet Hybrid (Model.py)<br/>• Backbone Kép: ConvNeXtV2 (Cục bộ) + SwinV2 (Toàn cục)<br/>• FPN Multi-Scale Decoder + 15-Channel Spatial Attention Head<br/>• Residual Channel Gating α (trần 0.8) & Gradient Checkpointing"]
-
-    ARCH_INIT --> STAGE_1["Giai Đoạn 1: Khởi Động Vùng Chú Ý (Chỉ dùng VinDr-CXR có BBox)<br/>• Augmentation hình học đồng bộ 18 kênh (3 kênh ảnh + 15 kênh mask)<br/>• Multi-channel Focal Tversky Dice Loss (β=0.7 > α=0.3 phạt nặng bỏ sót)<br/>• Asymmetric Loss (ASL) + Sparsity Regularization (weight = 0.1)"]
-
-    STAGE_1 --> S1_CHECK{"Kiểm Tra Điều Kiện Chuyển Giai Đoạn (2 Epoch Liên Tiếp)<br/>Dice Loss < 0.65 VÀ Validation AUROC > 0.68 ?"}
-
-    S1_CHECK --> STAGE_2["Giai Đoạn 2: Huấn Luyện Toàn Diện (Toàn Bộ VinDr + NIH)<br/>• HybridBatchSampler: Tỷ lệ cố định 1:3 (25% VinDr BBox + 75% NIH)<br/>• Bổ sung Color Augmentation (ColorJitter + Blur) chỉ trên 3 kênh ảnh<br/>• Duy trì định vị tổn thương và tối đa hóa độ bao phủ bệnh lý"]
-
-    STAGE_2 --> LOSS_OPT["Hàm Mất Mát Đa Nhiệm Tự Cân Bằng (TrainModel.py)<br/>• Uncertainty Weighting: Tự học phương sai log(σ²) cho ASL và Dice Loss<br/>• No Finding Consistency Penalty: Phạt dự đoán mâu thuẫn bệnh vs bình thường<br/>• Sparsity Regularization (weight = 0.05) chống sụp đổ bản đồ chú ý"]
-
-    LOSS_OPT --> OPTIM_STEP["Bộ Tối Ưu Hóa Tách Tốc Độ Học (Discriminative AdamW)<br/>• Backbone: LR = 1e-4 (Bảo toàn biểu diễn nền tảng)<br/>• Attention Head & FPN: LR = 5e-4 (Học định vị nhanh)<br/>• Linear Warmup 3 Epochs + Cosine Annealing Learning Rate"]
-
-    OPTIM_STEP --> EMA_STEP["Cập Nhật Trọng Số Shadow Mượt Mà (Model EMA)<br/>• Exponential Moving Average (Decay = 0.999) cho weights & BatchNorm buffers<br/>• Gradient Clipping (max_norm = 1.0) chống bùng nổ gradient"]
-
-    EMA_STEP --> VAL_EVAL["Đánh Giá Validation Cuối Mỗi Epoch (EMA + TTA)<br/>• Test-Time Augmentation: Trung bình xác suất ảnh gốc + ảnh lật ngang<br/>• Đo Mean AUROC & PR-AUC trên 15 lớp bệnh lý<br/>• Giám sát phân phối Attention Map (mean/std) chống hiện tượng collapse"]
-
-    VAL_EVAL --> CKPT_SAVE["Quản Lý Checkpoint An Toàn 2 Tầng (checkpoint_utils.py)<br/>• state_dict: Lưu trọng số EMA Shadow phục vụ suy luận tối ưu<br/>• training_state_dict: Lưu trọng số gốc phục vụ tiếp tục huấn luyện<br/>• Lưu đầy đủ trạng thái Optimizer, Scheduler, Scaler, Uncertainty Weights"]
-
-    CKPT_SAVE --> SAVE_OUT["Lưu Trọng Số Xuất Sắc Nhất: Trainedmodel/hybrid_model.pth<br/>(Early Stopping: Patience = 10 ở GĐ 1, Patience = 8 ở GĐ 2)"]
-```
 
 ##### 1. Chuẩn Bị & Nạp Dữ Liệu Đa Nguồn (`read_data.py`, `main.py`)
 - **Gộp nhóm giải quyết đa bác sĩ đọc (Multi-Radiologist Aggregation)**: Dữ liệu VinDr-CXR chứa nhiều dòng cho cùng một ảnh do nhiều bác sĩ X-quang gán nhãn độc lập. `DatasetGenerator` nhóm dữ liệu theo `Image Index`:
@@ -399,26 +320,11 @@ Hệ thống kết hợp 5 thành phần mất mát bổ trợ chặt chẽ:
 #### B. Quá Trình Huấn Luyện Model YOLO11m
 
 Quy trình huấn luyện mạng định vị tổn thương YOLO11m kết hợp dữ liệu VinDr-CXR và nhãn giả chưng cất tri thức (Knowledge Distillation) từ CheXNet Model:
-
-```mermaid
-flowchart TB
-    DS_VINDR["Tập VinDr-CXR (18,000 ảnh)<br/>Bounding Box thực từ Bác sĩ X-quang"] --> WBF_STEP["Gộp Box Đồng Thuận Bằng Thuật Toán WBF<br/>(Weighted Boxes Fusion)"]
-    
-    DS_NIH["Tập NIH ChestX-ray 14 (112,120 ảnh)<br/>Ảnh có nhãn bệnh nhưng chưa có BBox"] --> DISTILL_STEP["Phương Pháp Chưng Cất Tri Thức (Knowledge Distillation):<br/>Dùng Attention Maps từ CheXNet Model<br/>để trích xuất Pseudo BBox cho 4 bệnh thiếu"]
-
-    WBF_STEP --> UNIFIED_DATA["Tạo Bộ Dữ Liệu Đồng Bộ 14 Lớp Bệnh Lý<br/>Chuyển đổi nhãn tọa độ sang định dạng chuẩn YOLO txt"]
-    DISTILL_STEP --> UNIFIED_DATA
-
-    UNIFIED_DATA --> PROG_P1["Giai Đoạn 1: Khởi Động Nhanh (Độ Phân Giải 640×640)<br/>• Khởi tạo trọng số pretrained YOLO11m<br/>• Học bố cục tổng quan các tổn thương lớn (Bóng tim to, Tràn dịch)<br/>• Augmentation: Mosaic, MixUp, Random Perspective"]
-
-    PROG_P1 --> PROG_P2["Giai Đoạn 2: Tinh Chỉnh Chi Tiết (Độ Phân Giải Cao 1024×1024)<br/>• Tăng kích thước ảnh lên 1024px để bắt vi tổn thương nhỏ (Nốt mờ, vôi hóa)<br/>• Giảm Learning Rate, áp dụng HSV Jitter & Tối ưu hóa Loss CIoU + DFL + BCE"]
-
-    PROG_P2 --> TTA_TEST["Đánh Giá Kiểm Thử với Kỹ Thuật TTA (Test-Time Augmentation)<br/>Dự đoán ảnh gốc + Ảnh lật ngang và gộp kết quả qua WBF"]
-
-    TTA_TEST --> METRIC_CHECK["Đo Lường Các Chỉ Số Khoa Học Độc Lập<br/>mAP@50, mAP@50-95, Precision, Recall trên 14 lớp bệnh"]
-
-    METRIC_CHECK --> EXPORT_WEIGHTS["Xuất Trọng Số Tối Ưu Nhất Đạt Tiêu Chuẩn<br/>➜ Lưu file trọng số: yolov11m.pt"]
-```
+- **Tập hợp dữ liệu đa nguồn**: Kết hợp 18,000 ảnh VinDr-CXR (Bounding Box thực tế từ nhiều bác sĩ X-quang hợp nhất bằng thuật toán WBF - Weighted Boxes Fusion) và nhãn giả sinh từ Attention Maps của CheXNet cho 4 bệnh lý còn thiếu nhãn BBox. Toàn bộ nhãn được đồng bộ về định dạng chuẩn YOLO txt.
+- **Huấn luyện lũy tiến 2 giai đoạn (Progressive Multi-phase Training)**:
+  - *Giai đoạn 1 (640×640)*: Học nhanh ở độ phân giải 640px với trọng số khởi tạo YOLO11m để nắm bắt bố cục tổng quan các tổn thương lớn (Cardiomegaly, Effusion), kết hợp kỹ thuật Mosaic, MixUp.
+  - *Giai đoạn 2 (1024×1024)*: Tinh chỉnh chi tiết ở độ phân giải cao 1024px nhằm khoanh chính xác các vi tổn thương nhỏ (Nốt mờ Nodule ≤ 3mm, viền xơ mỏng), giảm Learning Rate và tối ưu hóa hàm mất mát Complete IoU (CIoU) + DFL + BCE.
+- **Đánh giá kiểm thử & Xuất trọng số**: Sử dụng kỹ thuật TTA (Test-Time Augmentation) dự đoán trên ảnh gốc và ảnh lật ngang rồi gộp kết quả qua WBF, đo lường các chỉ số mAP@50, mAP@50-95 và lưu tệp trọng số tối ưu tại `Trainedmodel/yolov11m.pt`.
 
 ---
 
