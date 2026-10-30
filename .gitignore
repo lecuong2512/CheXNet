@@ -11,8 +11,8 @@ __pycache__/
 Trainedmodel/*.pth
 
 # Excluded folders requested by user
-Frontend/
-Backend/
+# Frontend/
+# Backend/
 
 # Frontend dependencies and builds
 node_modules/

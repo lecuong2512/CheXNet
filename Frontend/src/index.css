@@ -1,0 +1,140 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #030d1a;
+  --color-surface: #071628;
+  --color-surface2: #0a1f38;
+  --color-border: rgba(0, 212, 255, 0.12);
+  --color-border-bright: rgba(0, 212, 255, 0.35);
+  --color-cyan: #00d4ff;
+  --color-cyan-dim: rgba(0, 212, 255, 0.15);
+  --color-green: #00e5a0;
+  --color-red: #ff4560;
+  --color-yellow: #ffb020;
+  --color-text: #e2edf7;
+  --color-muted: #4a6a8a;
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  min-height: 100%;
+}
+
+body {
+  background-color: #030d1a;
+  color: #e2edf7;
+  font-family: 'DM Sans', system-ui, sans-serif;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: rgba(3, 13, 26, 0.6); }
+::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.25); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 212, 255, 0.5); }
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.8); opacity: 1; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+@keyframes scan-line {
+  0% { top: 0%; opacity: 1; }
+  100% { top: 100%; opacity: 0.3; }
+}
+
+@keyframes float-up {
+  0% { opacity: 0; transform: translateY(20px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.2), 0 0 60px rgba(0, 212, 255, 0.05); }
+  50% { box-shadow: 0 0 35px rgba(0, 212, 255, 0.45), 0 0 85px rgba(0, 212, 255, 0.18); }
+}
+
+@keyframes data-stream {
+  0% { opacity: 0; transform: translateX(-10px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes heatmap-fade {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-float-up { animation: float-up 0.5s ease-out forwards; }
+.animate-glow-pulse { animation: glow-pulse 3s ease-in-out infinite; }
+.animate-spin-slow { animation: spin-slow 8s linear infinite; }
+
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(0, 212, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+.glass {
+  background: rgba(7, 22, 40, 0.7);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(0, 212, 255, 0.12);
+}
+
+.glass-bright {
+  background: rgba(7, 22, 40, 0.88);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+}
+
+.cyan-glow {
+  box-shadow: 0 0 24px rgba(0, 212, 255, 0.25), 0 0 60px rgba(0, 212, 255, 0.08);
+}
+
+.text-gradient-cyan {
+  background: linear-gradient(135deg, #00d4ff 0%, #00e5a0 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.scan-overlay {
+  position: absolute;
+  left: 0; right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, #00d4ff, #00e5a0, transparent);
+  box-shadow: 0 0 12px #00d4ff;
+  animation: scan-line 2s ease-in-out infinite;
+}
+
+.data-stream-item {
+  animation: data-stream 0.4s ease-out forwards;
+}
+
+.heatmap-reveal {
+  animation: heatmap-fade 0.8s ease-out forwards;
+}
+
+/* Print Styles for PDF / Hospital Report */
+@media print {
+  body { background: #fff !important; color: #000 !important; }
+  header, footer, nav, button, .no-print { display: none !important; }
+  .print-container { width: 100% !important; padding: 0 !important; background: #fff !important; color: #000 !important; }
+  .glass, .glass-bright { background: #fff !important; border: 1px solid #ccc !important; color: #000 !important; backdrop-filter: none !important; }
+  .text-gradient-cyan { -webkit-text-fill-color: #000 !important; color: #000 !important; }
+}
