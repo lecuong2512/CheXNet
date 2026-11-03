@@ -8,7 +8,8 @@ class HybridCNNViTModel(nn.Module):
     """
     Hybrid ConvNeXtV2 + SwinV2 for Multi-label Classification with Residual Masking
     """
-    def __init__(self, num_classes=15, model_size='base', img_size=384, dropout_rate=0.3, pretrained=True):
+    def __init__(self, num_classes=15, model_size='base', img_size=384, dropout_rate=0.3,
+                 pretrained=True, drop_path_rate=None, num_msd=5):
         """
         pretrained: True khi TRAIN (cần tải ImageNet weights làm điểm khởi tạo).
                     False khi INFERENCE/BACKEND — chỉ cần đúng "khung" kiến trúc,
@@ -17,8 +18,21 @@ class HybridCNNViTModel(nn.Module):
                     (main.py) gọi HybridCNNViTModel(..., pretrained=False) sẽ ném
                     TypeError ngay khi khởi tạo -> model không bao giờ load được,
                     mọi request /predict chỉ nhận lỗi "Mô hình chưa được tải".
+        drop_path_rate: Stochastic Depth rate chống overfit cho ConvNeXtV2 & SwinV2.
+                        Mặc định: 0.3 cho Large, 0.2 cho Base khi train (pretrained=True),
+                        0.0 khi inference (pretrained=False). Không làm thay đổi state_dict.
+        num_msd: Số nhánh Multi-Sample Dropout (MSD) ở Classifier Head khi training
+                 (giảm phương sai gradient tương đương R-Drop nhưng tốn ~0% thời gian).
+                 Khi model.eval(), Dropout tắt hoàn toàn nên kết quả giống hệt 1 nhánh.
         """
         super(HybridCNNViTModel, self).__init__()
+
+        if drop_path_rate is None:
+            if pretrained:
+                drop_path_rate = 0.3 if model_size == 'large' else 0.2
+            else:
+                drop_path_rate = 0.0
+        self.num_msd = num_msd
         
         # Chọn cấu hình cặp Backbone
         # Lưu ý: ConvNeXtV2 pretrained weights chỉ tồn tại cho một số resolution
@@ -43,8 +57,10 @@ class HybridCNNViTModel(nn.Module):
             swin_name = 'swinv2_base_window12to16_192to256.ms_in22k_ft_in1k'
             cnn_dim, swin_dim = 1024, 1024
 
-        # 1. Local Feature Extractor (CNN)
-        self.cnn = timm.create_model(cnn_name, pretrained=pretrained, features_only=True)
+        # 1. Local Feature Extractor (CNN) với Stochastic Depth (drop_path_rate)
+        self.cnn = timm.create_model(
+            cnn_name, pretrained=pretrained, features_only=True, drop_path_rate=drop_path_rate
+        )
         
         # FPN for multi-scale attention map
         cnn_feature_info = self.cnn.feature_info
@@ -61,8 +77,10 @@ class HybridCNNViTModel(nn.Module):
         # Projector để đồng bộ số kênh giữa CNN và ViT (nếu cần)
         self.channel_proj = nn.Conv2d(cnn_dim, swin_dim, kernel_size=1) if cnn_dim != swin_dim else nn.Identity()
 
-        # 2. Global Context (ViT - Lấy stage cuối của SwinV2)
-        swin_full = timm.create_model(swin_name, pretrained=pretrained, num_classes=0, global_pool='')
+        # 2. Global Context (ViT - Lấy stage cuối của SwinV2) với Stochastic Depth
+        swin_full = timm.create_model(
+            swin_name, pretrained=pretrained, num_classes=0, global_pool='', drop_path_rate=drop_path_rate
+        )
         self.vit_blocks = swin_full.layers[-1] 
         if hasattr(self.vit_blocks, 'downsample') and self.vit_blocks.downsample is not None:
             self.vit_blocks.downsample = nn.Identity()
@@ -190,9 +208,12 @@ class HybridCNNViTModel(nn.Module):
             ch_start = ch_end
         masked_features = torch.cat(gated_groups, dim=1)
 
-        # 5. Global Average Pooling & Phân loại
+        # 5. Global Average Pooling & Phân loại (Multi-Sample Dropout khi training)
         pooled = F.adaptive_avg_pool2d(masked_features, (1, 1)).flatten(1)
-        logits = self.classifier(pooled)
+        if self.training and self.num_msd > 1:
+            logits = torch.stack([self.classifier(pooled) for _ in range(self.num_msd)], dim=0).mean(dim=0)
+        else:
+            logits = self.classifier(pooled)
 
         if return_embedding:
             return logits, attention_map, pooled

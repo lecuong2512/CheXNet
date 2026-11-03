@@ -1,7 +1,15 @@
 # main.py
 import os
 import sys
+import argparse
 import torch
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
 
 # Fix lỗi thanh tiến trình tqdm bị nhảy nhiều dòng trong Colab khi chạy bằng !python
 # Bằng cách giả lập môi trường terminal (TTY), tqdm sẽ dùng \r để đè dòng thay vì \n
@@ -38,16 +46,61 @@ if models_dir not in sys.path:
 
 from TrainModel import HybridTrainer
 from config import TensorCoreConfig
-
-
 from checkpoint_utils import load_checkpoint_safe, extract_state_dict
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Hybrid CNN-ViT Multi-Label Chest X-ray Training & Evaluation")
+    parser.add_argument('--mode', type=str, choices=['train', 'resume', 'test', '1', '2', '3'], default=None,
+                        help="Chế độ chạy: train (1), resume (2), hoặc test (3). Để trống để chạy menu tương tác.")
+    parser.add_argument('--model-size', type=str, choices=['base', 'large'], default=None,
+                        help="Kích thước cặp backbone: 'base' (125.3M) hoặc 'large' (279.1M)")
+    parser.add_argument('--img-size', type=int, choices=[256, 384], default=384,
+                        help="Kích thước ảnh đầu vào (256 hoặc 384, mặc định 384)")
+    parser.add_argument('--batch-size', type=int, default=0,
+                        help="Batch size (0 = tự động chọn cấu hình tối ưu theo phần cứng)")
+    parser.add_argument('--epochs', type=int, default=15,
+                        help="Số epoch tối đa (mặc định 15 — đủ cho 4-5 ep Stage 1 + 8-10 ep Stage 2)")
+    parser.add_argument('--data-dir', type=str, default='Database', help="Thư mục chứa ảnh")
+    parser.add_argument('--train-csv', type=str, default='Dataset/train_list.csv', help="File CSV Train")
+    parser.add_argument('--val-csv', type=str, default='Dataset/val_list.csv', help="File CSV Val")
+    parser.add_argument('--test-csv', type=str, default='Dataset/test_list.csv', help="File CSV Test")
+    parser.add_argument('--model-path', type=str, default=None,
+                        help="Đường dẫn lưu/đọc file model (.pth)")
+    parser.add_argument('--resume-path', type=str, default=None,
+                        help="Đường dẫn checkpoint để resume (.pth)")
+    parser.add_argument('--save-dir', type=str, default='Results',
+                        help="Thư mục lưu kết quả đánh giá (Test mode)")
+    parser.add_argument('--preload', action='store_true',
+                        help="Đọc trước toàn bộ ảnh vào RAM dưới dạng bytes thô")
+    parser.add_argument('--num-workers-preload', type=int, default=8,
+                        help="Số luồng đọc song song khi preload vào RAM")
+    parser.add_argument('--num-workers', type=int, default=8,
+                        help="Số luồng DataLoader khi train/test")
+    parser.add_argument('--compile', action='store_true',
+                        help="Bật torch.compile (PyTorch 2.0+)")
+    parser.add_argument('--tta-views', type=int, choices=[1, 2, 4], default=4,
+                        help="Số góc nhìn TTA khi Test: 1 (không TTA), 2 (Crop+Flip), 4 (Crop+Flip + FullResize+Flip)")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     print("\n" + "=" * 80)
     print("Group Project: Hybrid CNN-ViT Multi-Label Chest X-ray Classification")
     print("Architecture: ConvNeXtV2 & SwinV2 | Residual Masking")
     print("=" * 80 + "\n")
+
+    if args.mode is not None:
+        m = args.mode.lower()
+        if m in ('train', '1'):
+            runTrain(resume=False, args=args)
+        elif m in ('resume', '2'):
+            runTrain(resume=True, args=args)
+        elif m in ('test', '3'):
+            runTest(args=args)
+        return
 
     print("Chọn chế độ:")
     print("  1. Train mới từ đầu")
@@ -66,16 +119,22 @@ def main():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-def runTrain(resume: bool = False):
+def runTrain(resume: bool = False, args=None):
     print("\n[MODE] Khởi tạo huấn luyện Mô hình Lai")
+    cli_mode = (args is not None and args.mode is not None)
 
     resume_path = None
+    ckpt_model_size = None
+    ckpt_img_size = None
 
     # ── A. Nếu resume: load checkpoint trước để tự động điền model_size / img_size
     if resume:
-        resume_path = input(
-            "\n📂 Đường dẫn checkpoint cũ (.pth) [Trainedmodel/hybrid_model.pth]: "
-        ).strip() or 'Trainedmodel/hybrid_model.pth'
+        if cli_mode:
+            resume_path = args.resume_path or args.model_path or 'Trainedmodel/hybrid_model.pth'
+        else:
+            resume_path = input(
+                "\n📂 Đường dẫn checkpoint cũ (.pth) [Trainedmodel/hybrid_model.pth]: "
+            ).strip() or 'Trainedmodel/hybrid_model.pth'
 
         if os.path.isfile(resume_path):
             device_tmp = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -90,83 +149,100 @@ def runTrain(resume: bool = False):
                   f"best AUROC = {ckpt_auroc:.4f}")
             if ckpt_model_size:
                 print(f"   model_size={ckpt_model_size}, img_size={ckpt_img_size}")
+            del ckpt_tmp
         else:
-            ckpt_model_size = None
-            ckpt_img_size   = None
             print(f"⚠️  Không tìm thấy '{resume_path}' — sẽ bắt đầu như train mới.")
             resume_path = None
 
-    # ── B. Chọn Backbone
-    print("\n🏗️ Chọn cặp Backbone:")
-    print("  1. Base-Base (ConvNeXtV2-Base + SwinV2-Base)  — VRAM 12–16 GB")
-    print("  2. Large-Large (ConvNeXtV2-Large + SwinV2-Large) — VRAM > 24 GB")
-    if resume and ckpt_model_size:
-        default_bb = '2' if ckpt_model_size == 'large' else '1'
-        bb_choice = input(f"Lựa chọn [1/2] (mặc định {default_bb} từ checkpoint): ").strip() or default_bb
+    if cli_mode:
+        model_size = args.model_size or ckpt_model_size or 'base'
+        img_size = args.img_size or ckpt_img_size or 384
+        config = TensorCoreConfig.get_optimal_hybrid_config(model_size, img_size)
+        TensorCoreConfig.print_config(config)
+        trBatchSize = args.batch_size if args.batch_size > 0 else config['batch_size']
+        pathDirData = args.data_dir
+        pathFileTrain = args.train_csv
+        pathFileVal = args.val_csv
+        default_model_path = f"Trainedmodel/hybrid_{model_size}.pth" if model_size == 'base' else 'Trainedmodel/hybrid_model.pth'
+        pathModel = args.model_path or default_model_path
+        preload_images = args.preload
+        num_workers_preload = args.num_workers_preload
+        trMaxEpoch = args.epochs
+        num_workers_train = args.num_workers
+        use_torch_compile = args.compile
     else:
-        bb_choice = input("Lựa chọn [1/2]: ").strip() or "1"
-    model_size = 'large' if bb_choice == '2' else 'base'
+        # ── B. Chọn Backbone
+        print("\n🏗️ Chọn cặp Backbone:")
+        print("  1. Base-Base (ConvNeXtV2-Base + SwinV2-Base)  — 125.3M params | VRAM 12–16 GB")
+        print("  2. Large-Large (ConvNeXtV2-Large + SwinV2-Large) — 279.1M params | VRAM > 24 GB")
+        if resume and ckpt_model_size:
+            default_bb = '2' if ckpt_model_size == 'large' else '1'
+            bb_choice = input(f"Lựa chọn [1/2] (mặc định {default_bb} từ checkpoint): ").strip() or default_bb
+        else:
+            bb_choice = input("Lựa chọn [1/2]: ").strip() or "1"
+        model_size = 'large' if bb_choice == '2' else 'base'
 
-    # ── C. Chọn Kích thước ảnh
-    print("\n📐 Chọn kích thước ảnh đầu vào:")
-    print("  1. 256×256 (Tốc độ nhanh, tiết kiệm VRAM)")
-    print("  2. 384×384 (Độ phân giải cao, khuyến nghị cho VinDr)")
-    if resume and ckpt_img_size:
-        default_sz = '2' if ckpt_img_size == 384 else '1'
-        sz_choice = input(f"Lựa chọn [1/2] (mặc định {default_sz} từ checkpoint): ").strip() or default_sz
-    else:
-        sz_choice = input("Lựa chọn [1/2]: ").strip() or "2"
-    img_size = 384 if sz_choice == '2' else 256
+        # ── C. Chọn Kích thước ảnh
+        print("\n📐 Chọn kích thước ảnh đầu vào:")
+        print("  1. 256×256 (Tốc độ nhanh, tiết kiệm VRAM)")
+        print("  2. 384×384 (Độ phân giải cao, khuyến nghị cho VinDr)")
+        if resume and ckpt_img_size:
+            default_sz = '2' if ckpt_img_size == 384 else '1'
+            sz_choice = input(f"Lựa chọn [1/2] (mặc định {default_sz} từ checkpoint): ").strip() or default_sz
+        else:
+            sz_choice = input("Lựa chọn [1/2]: ").strip() or "2"
+        img_size = 384 if sz_choice == '2' else 256
 
-    # ── D. Phân tích phần cứng & Batch Size
-    config = TensorCoreConfig.get_optimal_hybrid_config(model_size, img_size)
-    TensorCoreConfig.print_config(config)
+        # ── D. Phân tích phần cứng & Batch Size
+        config = TensorCoreConfig.get_optimal_hybrid_config(model_size, img_size)
+        TensorCoreConfig.print_config(config)
 
-    use_optimal = input("\nSử dụng Batch Size đề xuất? [y/n]: ").strip().lower()
-    if use_optimal == 'y':
-        trBatchSize = config['batch_size']
-    else:
-        trBatchSize = int(input("Nhập Batch Size thủ công (VD: 8, 16, 32): ").strip())
+        use_optimal = input("\nSử dụng Batch Size đề xuất? [y/n]: ").strip().lower()
+        if use_optimal == 'y':
+            trBatchSize = config['batch_size']
+        else:
+            trBatchSize = int(input("Nhập Batch Size thủ công (VD: 8, 16, 32): ").strip())
 
-    # ── E. Đường dẫn dữ liệu
-    print("\n📂 Cấu hình đường dẫn dữ liệu:")
-    pathDirData   = input("Thư mục chứa ảnh [Database/]: ").strip() or 'Database'
-    pathFileTrain = input("File CSV Train [Dataset/train_list.csv]: ").strip() or 'Dataset/train_list.csv'
-    pathFileVal   = input("File CSV Val   [Dataset/val_list.csv]: ").strip() or 'Dataset/val_list.csv'
-    pathModel     = input("Đường dẫn lưu model [Trainedmodel/hybrid_model.pth]: ").strip() or 'Trainedmodel/hybrid_model.pth'
+        # ── E. Đường dẫn dữ liệu
+        print("\n📂 Cấu hình đường dẫn dữ liệu:")
+        pathDirData   = input("Thư mục chứa ảnh [Database/]: ").strip() or 'Database'
+        pathFileTrain = input("File CSV Train [Dataset/train_list.csv]: ").strip() or 'Dataset/train_list.csv'
+        pathFileVal   = input("File CSV Val   [Dataset/val_list.csv]: ").strip() or 'Dataset/val_list.csv'
+        default_model_path = 'Trainedmodel/hybrid_base.pth' if model_size == 'base' else 'Trainedmodel/hybrid_model.pth'
+        pathModel     = input(f"Đường dẫn lưu model [{default_model_path}]: ").strip() or default_model_path
 
-    # ── F. Preload vào RAM
-    print("\n💾 Preload dữ liệu vào RAM:")
-    print("  1. Không — đọc ảnh từ đĩa mỗi epoch (an toàn, ít RAM)")
-    print("  2. Có    — đọc toàn bộ vào RAM 1 lần (train nhanh hơn, cần nhiều RAM)")
-    preload_choice = input("Lựa chọn [1/2]: ").strip() or "1"
-    preload_images = (preload_choice == '2')
-    num_workers_preload = 8
-    if preload_images:
-        nw = input("Số threads đọc song song [8]: ").strip()
-        num_workers_preload = int(nw) if nw else 8
+        # ── F. Preload vào RAM
+        print("\n💾 Preload dữ liệu vào RAM:")
+        print("  1. Không — đọc ảnh từ đĩa mỗi epoch (an toàn, ít RAM)")
+        print("  2. Có    — đọc toàn bộ vào RAM 1 lần (train nhanh hơn, cần nhiều RAM)")
+        preload_choice = input("Lựa chọn [1/2]: ").strip() or "1"
+        preload_images = (preload_choice == '2')
+        num_workers_preload = 8
+        if preload_images:
+            nw = input("Số threads đọc song song [8]: ").strip()
+            num_workers_preload = int(nw) if nw else 8
 
-    # ── G. Số epoch
-    trMaxEpoch = int(input("\nSố Epoch tối đa cho lần chạy này [50]: ").strip() or "50")
+        # ── G. Số epoch (khuyến nghị 14-15 epoch thay vì 50 để tránh overfit ở Stage 2)
+        trMaxEpoch = int(input("\nSố Epoch tối đa cho lần chạy này [15]: ").strip() or "15")
 
-    # ── H. Số lượng tiến trình tải ảnh
-    print("\n⚙️ Cấu hình luồng tải dữ liệu:")
-    print("  Trên Windows, num_workers cao có thể gây lỗi 1455 (hết bộ nhớ ảo/pagefile).")
-    print("  Nếu bị lỗi 1455, hãy giảm xuống 2 hoặc 4.")
-    nw_input = input("  Số luồng đọc ảnh (num_workers) [12]: ").strip()
-    num_workers_train = int(nw_input) if nw_input else 12
+        # ── H. Số lượng tiến trình tải ảnh
+        print("\n⚙️ Cấu hình luồng tải dữ liệu:")
+        print("  Trên Windows, num_workers cao có thể gây lỗi 1455 (hết bộ nhớ ảo/pagefile).")
+        print("  Nếu bị lỗi 1455, hãy giảm xuống 2 hoặc 4.")
+        nw_input = input("  Số luồng đọc ảnh (num_workers) [12]: ").strip()
+        num_workers_train = int(nw_input) if nw_input else 12
 
-    # ── I. torch.compile (công tắc cứng)
-    print("\n⚡ torch.compile:")
-    print("  Tăng tốc 10-20% nhưng có thể gây lỗi khi dùng multi-GPU.")
-    use_compile_input = input("  Bật torch.compile? [y/n, mặc định n]: ").strip().lower()
-    use_torch_compile = (use_compile_input == 'y')
+        # ── I. torch.compile (công tắc cứng)
+        print("\n⚡ torch.compile:")
+        print("  Tăng tốc 10-20% nhưng có thể gây lỗi khi dùng multi-GPU.")
+        use_compile_input = input("  Bật torch.compile? [y/n, mặc định n]: ").strip().lower()
+        use_torch_compile = (use_compile_input == 'y')
 
     print("\n" + "=" * 80)
     if resume and resume_path:
-        print("🔄 TIẾP TỤC HUẤN LUYỆN TỪ CHECKPOINT")
+        print(f"🔄 TIẾP TỤC HUẤN LUYỆN ({model_size.upper()}, {img_size}px) TỪ CHECKPOINT")
     else:
-        print("🚀 BẮT ĐẦU HUẤN LUYỆN MỚI — 2 GIAI ĐOẠN")
+        print(f"🚀 BẮT ĐẦU HUẤN LUYỆN MỚI ({model_size.upper()}, {img_size}px) — 2 GIAI ĐOẠN")
     print("=" * 80)
 
     HybridTrainer.train(
@@ -187,12 +263,14 @@ def runTrain(resume: bool = False):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-def runTest():
+def runTest(args=None):
     print("\n[MODE] Kiểm thử / Đánh giá Mô hình Lai")
+    cli_mode = (args is not None and args.mode is not None)
 
     from read_data import DatasetGenerator, FastDataLoader
     from Model import HybridCNNViTModel
     import numpy as np
+    import torch.nn.functional as F
     import torchvision.transforms as transforms
     from sklearn.metrics import roc_auc_score, confusion_matrix, classification_report
     import matplotlib
@@ -202,13 +280,21 @@ def runTest():
     CLASS_NAMES = HybridTrainer.CLASS_NAMES
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # ── Đường dẫn
-    pathModel   = input("Đường dẫn file model (.pth) [Trainedmodel/hybrid_model.pth]: ").strip() or 'Trainedmodel/hybrid_model.pth'
-    pathDirData = input("Thư mục chứa ảnh [Database/]: ").strip() or 'Database'
-    pathFileTest = input("File CSV Test [Dataset/test_list.csv]: ").strip() or 'Dataset/test_list.csv'
-    save_dir    = input("Thư mục lưu kết quả [Results/]: ").strip() or 'Results'
-    os.makedirs(save_dir, exist_ok=True)
+    if cli_mode:
+        pathModel = args.model_path or 'Trainedmodel/hybrid_model.pth'
+        pathDirData = args.data_dir
+        pathFileTest = args.test_csv
+        save_dir = args.save_dir
+        tta_views = args.tta_views
+    else:
+        # ── Đường dẫn
+        pathModel   = input("Đường dẫn file model (.pth) [Trainedmodel/hybrid_model.pth]: ").strip() or 'Trainedmodel/hybrid_model.pth'
+        pathDirData = input("Thư mục chứa ảnh [Database/]: ").strip() or 'Database'
+        pathFileTest = input("File CSV Test [Dataset/test_list.csv]: ").strip() or 'Dataset/test_list.csv'
+        save_dir    = input("Thư mục lưu kết quả [Results/]: ").strip() or 'Results'
+        tta_views   = 4
 
+    os.makedirs(save_dir, exist_ok=True)
     print(f"\nDevice: {device}")
 
     # ── Load checkpoint
@@ -219,20 +305,24 @@ def runTest():
           f"best_auroc={ckpt.get('best_auroc',0.0):.4f}")
     print(f"   model_size={ckpt_model_size}, img_size={ckpt_img_size}")
 
-    # ── Xác nhận hoặc ghi đè model_size / img_size
-    print("\n🏗️ Chọn kích thước model:")
-    print(f"  1. Base  (mặc định từ checkpoint: {'✓' if ckpt_model_size=='base' else ' '})")
-    print(f"  2. Large (mặc định từ checkpoint: {'✓' if ckpt_model_size=='large' else ' '})")
-    default_bb = '2' if ckpt_model_size == 'large' else '1'
-    bb_in = input(f"Lựa chọn [1/2] (Enter = {default_bb}): ").strip() or default_bb
-    model_size = 'large' if bb_in == '2' else 'base'
+    if cli_mode:
+        model_size = args.model_size or ckpt_model_size
+        img_size = args.img_size or ckpt_img_size
+    else:
+        # ── Xác nhận hoặc ghi đè model_size / img_size
+        print("\n🏗️ Chọn kích thước model:")
+        print(f"  1. Base  (mặc định từ checkpoint: {'✓' if ckpt_model_size=='base' else ' '})")
+        print(f"  2. Large (mặc định từ checkpoint: {'✓' if ckpt_model_size=='large' else ' '})")
+        default_bb = '2' if ckpt_model_size == 'large' else '1'
+        bb_in = input(f"Lựa chọn [1/2] (Enter = {default_bb}): ").strip() or default_bb
+        model_size = 'large' if bb_in == '2' else 'base'
 
-    print("\n📐 Chọn kích thước ảnh:")
-    print(f"  1. 256×256   (mặc định từ checkpoint: {'✓' if ckpt_img_size==256 else ' '})")
-    print(f"  2. 384×384   (mặc định từ checkpoint: {'✓' if ckpt_img_size==384 else ' '})")
-    default_sz = '2' if ckpt_img_size == 384 else '1'
-    sz_in = input(f"Lựa chọn [1/2] (Enter = {default_sz}): ").strip() or default_sz
-    img_size = 384 if sz_in == '2' else 256
+        print("\n📐 Chọn kích thước ảnh:")
+        print(f"  1. 256×256   (mặc định từ checkpoint: {'✓' if ckpt_img_size==256 else ' '})")
+        print(f"  2. 384×384   (mặc định từ checkpoint: {'✓' if ckpt_img_size==384 else ' '})")
+        default_sz = '2' if ckpt_img_size == 384 else '1'
+        sz_in = input(f"Lựa chọn [1/2] (Enter = {default_sz}): ").strip() or default_sz
+        img_size = 384 if sz_in == '2' else 256
 
     # ── Build & load model
     print(f"\n🏗️ Đang load model ({model_size.upper()}, {img_size}px)...")
@@ -241,26 +331,23 @@ def runTest():
     model.load_state_dict(state_dict)
     model.eval()
 
-    # ── Dataset test
+    # ── Dataset test: Resize về int(img_size * 1.14) (438×438 khi img_size=384)
+    # để vừa lấy được CenterCrop (384×384) vừa lấy được Full-View Resize (384×384)
+    # giúp bảo toàn góc sườn hoành (Effusion, Pleural Thickening) và đỉnh phổi (Pneumothorax).
+    outer_size = int(img_size * 1.14)
     transformTest = transforms.Compose([
-        transforms.Resize(int(img_size * 1.14)),
-        transforms.CenterCrop(img_size),
+        transforms.Resize((outer_size, outer_size)),
     ])
     datasetTest   = DatasetGenerator(pathDirData, pathFileTest, transformTest)
+    test_bs = args.batch_size if (cli_mode and args.batch_size > 0) else 8
+    test_nw = args.num_workers if cli_mode else 4
     dataLoaderTest = FastDataLoader.create_dataloader(
-        datasetTest, batch_size=8, shuffle=False, num_workers=4
+        datasetTest, batch_size=test_bs, shuffle=False, num_workers=test_nw
     )
 
-    # ── Inference với TTA (Test-Time Augmentation)
-    # TTA: chạy forward 2 lần (gốc + flip ngang), lấy trung bình logits
-    # → ổn định hơn, AUROC +0.3-0.5% so với inference đơn
-    print("\n🔍 Đang chạy inference + TTA...")
+    print(f"\n🔍 Đang chạy inference với {tta_views}-View Multi-Resolution TTA...")
     allPreds, allTargets = [], []
     
-    # Detect AMP dtype (Sửa lỗi "GET was unable to find an engine" và lỗi NaN trên GPU đời cũ)
-    # Nguyên nhân 1: Test bằng float16 trên T4 bị tràn số -> NaN.
-    # Nguyên nhân 2: Test bằng bfloat16 trên T4 bị lỗi cuDNN không hỗ trợ ConvNeXt.
-    # Khắc phục: Ép về float32 toàn bộ khi test trên máy yếu (compute_cap < 8.0) để an toàn 100%.
     use_amp = device.type == 'cuda'
     if use_amp:
         compute_cap = torch.cuda.get_device_capability(0)
@@ -271,45 +358,62 @@ def runTest():
             amp_dtype = torch.float32
     else:
         amp_dtype = torch.float32
+
+    margin = (outer_size - img_size) // 2
     
     with torch.no_grad():
         from tqdm import tqdm
-        for inputs, targets, _, _ in tqdm(dataLoaderTest, desc="Testing+TTA", ncols=100):
-            inputs = inputs.to(device)
+        for inputs_outer, targets, _, _ in tqdm(dataLoaderTest, desc=f"Testing+{tta_views}ViewTTA", ncols=100):
+            inputs_outer = inputs_outer.to(device)
+            # View 1: CenterCrop (chuẩn Val)
+            inputs_crop = inputs_outer[:, :, margin:margin + img_size, margin:margin + img_size]
             with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
-                logits, _ = model(inputs)
-                # TTA: lật ngang ảnh và lấy trung bình PROBABILITIES (không phải logits)
-                # vì sigmoid là hàm phi tuyến: sigmoid((a+b)/2) ≠ (sigmoid(a)+sigmoid(b))/2
-                logits_flip, _ = model(torch.flip(inputs, dims=[3]))
-            avg_probs = (torch.sigmoid(logits.float()) + torch.sigmoid(logits_flip.float())) / 2.0
+                logits_c1, _ = model(inputs_crop)
+                probs = torch.sigmoid(logits_c1.float())
+
+                if tta_views >= 2:
+                    # View 2: Horizontal Flip của CenterCrop
+                    logits_c2, _ = model(torch.flip(inputs_crop, dims=[3]))
+                    probs = probs + torch.sigmoid(logits_c2.float())
+
+                if tta_views >= 4:
+                    # View 3 & 4: Full-image Resize (giữ trọn vẹn rìa phổi & góc sườn hoành) + Flip
+                    inputs_full = F.interpolate(inputs_outer, size=(img_size, img_size), mode='bilinear', align_corners=False)
+                    logits_f1, _ = model(inputs_full)
+                    logits_f2, _ = model(torch.flip(inputs_full, dims=[3]))
+                    probs = probs + torch.sigmoid(logits_f1.float()) + torch.sigmoid(logits_f2.float())
+
+            avg_probs = probs / float(tta_views)
             allPreds.append(avg_probs.cpu())
             allTargets.append(targets.cpu())
 
     allPreds   = torch.cat(allPreds,   dim=0).numpy()
     allTargets = torch.cat(allTargets, dim=0).numpy()
+
+    # Lưu xác suất dự đoán và nhãn thật để compare_models.py có thể ensemble / so sánh trực tiếp
+    np.save(os.path.join(save_dir, f'preds_{model_size}.npy'), allPreds)
+    np.save(os.path.join(save_dir, 'targets_test.npy'), allTargets)
+
     # ── Per-class optimal threshold (Youden's J statistic)
-    from sklearn.metrics import f1_score, precision_recall_curve, average_precision_score
+    from sklearn.metrics import f1_score, precision_recall_curve, average_precision_score, roc_curve
     
     optimal_thresholds = []
     for i in range(allPreds.shape[1]):
-        # Youden's J = sensitivity + specificity - 1 = TPR - FPR
-        from sklearn.metrics import roc_curve
         try:
             fpr, tpr, thresholds_roc = roc_curve(allTargets[:, i], allPreds[:, i])
             j_scores = tpr - fpr
             best_idx = np.argmax(j_scores)
             optimal_thresholds.append(thresholds_roc[best_idx])
         except Exception:
-            optimal_thresholds.append(0.5)  # Fallback khi class chỉ có 1 giá trị
+            optimal_thresholds.append(0.5)
     optimal_thresholds = np.array(optimal_thresholds)
     
-
     allBinary_fixed = (allPreds >= 0.5).astype(int)
     allBinary_optimal = (allPreds >= optimal_thresholds[None, :]).astype(int)
 
     # ── Per-class AUROC + PR-AUC + F1
     print("\n" + "=" * 80)
-    print("📊 KẾT QUẢ KIỂM THỬ")
+    print(f"📊 KẾT QUẢ KIỂM THỬ ({model_size.upper()}, {img_size}px, {tta_views}-View TTA)")
     print("=" * 80)
     print(f"  {'Bệnh':<22} {'AUROC':>8} {'PR-AUC':>8} {'Thr*':>6} {'F1@0.5':>8} {'F1@Thr*':>8}")
     print("  " + "-" * 66)
@@ -332,7 +436,8 @@ def runTest():
     mean_auroc = float(np.nanmean(aurocs))
     mean_pr_auc = float(np.nanmean(pr_aucs))
     print("  " + "-" * 66)
-    print(f"  {'Mean':<22} {mean_auroc:>8.4f} {mean_pr_auc:>8.4f}")
+    print(f"  {'Mean (15 classes)':<22} {mean_auroc:>8.4f} {mean_pr_auc:>8.4f}")
+    print(f"  {'Mean (14 diseases)':<22} {float(np.nanmean(aurocs[1:])):>8.4f} {float(np.nanmean(pr_aucs[1:])):>8.4f}")
 
     # ── Bootstrap 95% CI cho Mean AUROC
     print("\n📈 Bootstrap 95% Confidence Intervals (N=1000):")
@@ -375,7 +480,7 @@ def runTest():
     print(f"\n💾 Đã lưu per-class optimal thresholds tại: {thresholds_path}")
     print(f"   Dùng cho predict_single.py để thay thế threshold cố định 0.5")
 
-    allBinary = allBinary_fixed  # dùng cho classification_report & confusion matrix
+    allBinary = allBinary_fixed
 
     # Classification report
     print("\n📋 Classification Report (threshold=0.5):")
@@ -391,7 +496,7 @@ def runTest():
                label=f'Mean AUROC = {mean_auroc:.4f}')
     ax.set_ylim(0, 1.05)
     ax.set_ylabel('AUROC')
-    ax.set_title('Per-class AUROC trên Test Set')
+    ax.set_title(f'Per-class AUROC trên Test Set ({model_size.upper()})')
     ax.set_xticklabels(CLASS_NAMES, rotation=35, ha='right', fontsize=9)
     ax.legend(); ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
@@ -423,7 +528,6 @@ def runTest():
     # =========================================================================
     print("\n⏳ Đang vẽ các biểu đồ đánh giá chuyên sâu...")
     import seaborn as sns
-    from sklearn.metrics import precision_recall_curve
     
     # 1. ROC Curves (per class)
     plt.figure(figsize=(10, 8))
@@ -436,7 +540,7 @@ def runTest():
     plt.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
     plt.xlim([0.0, 1.0]); plt.ylim([0.0, 1.05])
     plt.xlabel('False Positive Rate'); plt.ylabel('True Positive Rate')
-    plt.title('ROC Curves per Class')
+    plt.title(f'ROC Curves per Class ({model_size.upper()})')
     plt.legend(loc="lower right", fontsize=8, ncol=2)
     roc_path = os.path.join(save_dir, 'test_roc_curves.png')
     plt.savefig(roc_path, dpi=150, bbox_inches='tight')
@@ -453,7 +557,7 @@ def runTest():
             pass
     plt.xlim([0.0, 1.0]); plt.ylim([0.0, 1.05])
     plt.xlabel('Recall'); plt.ylabel('Precision')
-    plt.title('Precision-Recall Curves per Class')
+    plt.title(f'Precision-Recall Curves per Class ({model_size.upper()})')
     plt.legend(loc="upper right", fontsize=8, ncol=2)
     pr_path = os.path.join(save_dir, 'test_pr_curves.png')
     plt.savefig(pr_path, dpi=150, bbox_inches='tight')
@@ -486,7 +590,6 @@ def runTest():
         sns.heatmap(cm_i, annot=True, fmt='d', cmap='Blues', ax=axes[i], cbar=False)
         axes[i].set_title(name, fontsize=10)
         axes[i].set_xticks([]); axes[i].set_yticks([])
-    # Hide any unused subplots
     for j in range(i + 1, len(axes)):
         axes[j].axis('off')
     plt.tight_layout()

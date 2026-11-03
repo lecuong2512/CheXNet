@@ -1,6 +1,14 @@
 # TrainModel.py
 import os
+import sys
 import time
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
 from tqdm import tqdm
 from collections import OrderedDict
 import numpy as np
@@ -34,63 +42,122 @@ def _is_main_process():
     return True
 
 
+def build_optimizer_param_groups(model, backbone_lr: float, head_lr: float, weight_decay: float = 0.05):
+    """
+    Tách tham số thành 4 nhóm chuẩn ConvNeXtV2 / SwinV2:
+      0: backbone_decay     (lr=backbone_lr, weight_decay=weight_decay)
+      1: backbone_no_decay  (lr=backbone_lr, weight_decay=0.0)
+      2: head_decay         (lr=head_lr,     weight_decay=weight_decay)
+      3: head_no_decay      (lr=head_lr,     weight_decay=0.0)
+
+    Bao gồm đầy đủ các module của head:
+      attention_head, fpn_lateral, fpn_merge, classifier, channel_proj, gate_alpha_raw.
+    Không áp weight_decay lên bias, LayerNorm/BatchNorm/GroupNorm (ndim <= 1) và gate_alpha_raw.
+    """
+    raw_model = _unwrap_model(model)
+    head_keywords = (
+        'attention_head', 'fpn_lateral', 'fpn_merge',
+        'classifier', 'channel_proj', 'gate_alpha_raw', 'raw_alpha'
+    )
+    no_decay_keywords = ('bias', 'norm', 'bn', 'gn', 'ln', 'gate_alpha_raw', 'raw_alpha', 'relative_position_bias_table')
+
+    backbone_decay, backbone_no_decay = [], []
+    head_decay, head_no_decay = [], []
+
+    for name, param in raw_model.named_parameters():
+        is_head = any(k in name for k in head_keywords)
+        is_no_decay = (param.ndim <= 1) or any(k in name.lower() for k in no_decay_keywords)
+        if is_head:
+            if is_no_decay:
+                head_no_decay.append(param)
+            else:
+                head_decay.append(param)
+        else:
+            if is_no_decay:
+                backbone_no_decay.append(param)
+            else:
+                backbone_decay.append(param)
+
+    return [
+        {'params': backbone_decay,    'lr': backbone_lr, 'weight_decay': weight_decay, 'group_name': 'backbone_decay'},
+        {'params': backbone_no_decay, 'lr': backbone_lr, 'weight_decay': 0.0,          'group_name': 'backbone_no_decay'},
+        {'params': head_decay,        'lr': head_lr,     'weight_decay': weight_decay, 'group_name': 'head_decay'},
+        {'params': head_no_decay,     'lr': head_lr,     'weight_decay': 0.0,          'group_name': 'head_no_decay'},
+    ]
+
+
 class AsymmetricLossOptimized(nn.Module):
     """
-    Asymmetric Loss (ASL) — Ridnik et al., ICCV 2021.
-    Drop-in replacement cho BCEWithLogitsLoss, thiết kế chuyên biệt cho
-    multi-label classification với class imbalance nghiêm trọng.
-
-    Cơ chế hoạt động:
-    1. Probability Shifting: dịch xác suất negative xuống thêm `clip`, khiến
-       các ca True Negative dễ (model đã rất chắc) có loss ≈ 0 → gradient ≈ 0.
-       Model "bỏ qua" ca dễ, dồn lực vào ca khó.
-    2. Asymmetric Focusing: gamma_neg cao (4) phạt nhẹ negative dễ, gamma_pos
-       thấp (0) giữ nguyên trọng số cho positive → ép model tập trung vào
-       các ca bệnh thực sự.
-
-    Tham số mặc định đã được validate trên MS-COCO, Open Images, và các
-    bộ dữ liệu y tế có tính chất tương tự (positive rate < 5%).
+    Asymmetric Loss (ASL) — Ridnik et al., ICCV 2021, tối ưu hóa cho 15 lớp X-quang ngực:
+    - Lớp 'No Finding' (chiếm ~55.88% mẫu dương tính) sử dụng gamma_neg=1.0, clip=0.0
+      để không triệt tiêu gradient của các ca có bệnh (negative của No Finding).
+    - 14 lớp bệnh lý hiếm (0.18% – 16.24%) sử dụng gamma_neg=4.0, clip=0.05.
+    - Hỗ trợ pos_weights (mild power-law) cho các lớp cực hiếm (Hernia, Pneumonia, Edema).
     """
-    def __init__(self, gamma_neg=4, gamma_pos=0, clip=0.05, eps=1e-4, disable_torch_grad_focal_loss=True):
+    def __init__(self, gamma_neg=4, gamma_pos=0, clip=0.05, eps=1e-4,
+                 disable_torch_grad_focal_loss=True, label_smoothing=0.0,
+                 pos_weights: Optional[torch.Tensor] = None, no_finding_idx: Optional[int] = 0):
         super().__init__()
         self.gamma_neg = gamma_neg
         self.gamma_pos = gamma_pos
         self.clip = clip
         self.eps = eps
         self.disable_torch_grad_focal_loss = disable_torch_grad_focal_loss
+        self.label_smoothing = label_smoothing
+        self.no_finding_idx = no_finding_idx
+        if pos_weights is not None:
+            self.register_buffer('pos_weights', pos_weights.float())
+        else:
+            self.pos_weights = None
 
     def forward(self, logits, targets):
-        # Sigmoid (nhận raw logits giống BCEWithLogitsLoss)
+        orig_targets = targets
+        if self.label_smoothing > 0:
+            targets = targets * (1 - self.label_smoothing) + self.label_smoothing / 2
+
         xs_pos = torch.sigmoid(logits)
-        xs_neg = 1 - xs_pos
+        xs_neg = 1.0 - xs_pos
 
-        # Probability shifting — chỉ áp dụng cho negative
+        # Per-class clip: không dịch xác suất negative trên kênh 'No Finding'
         if self.clip > 0:
-            xs_neg = (xs_neg + self.clip).clamp(max=1)
+            if self.no_finding_idx is not None and logits.ndim == 2 and logits.shape[1] > self.no_finding_idx:
+                clip_vec = torch.full((1, logits.shape[1]), self.clip, device=logits.device, dtype=logits.dtype)
+                clip_vec[0, self.no_finding_idx] = 0.0
+                xs_neg = (xs_neg + clip_vec).clamp(max=1.0)
+            else:
+                xs_neg = (xs_neg + self.clip).clamp(max=1.0)
 
-        # Basic cross-entropy
-        los_pos = targets * torch.log(xs_pos.clamp(min=self.eps))
-        los_neg = (1 - targets) * torch.log(xs_neg.clamp(min=self.eps))
+        # Basic cross-entropy (với mild pos_weights cho các lớp bệnh hiếm nếu được cung cấp)
+        if self.pos_weights is not None:
+            pw = self.pos_weights.to(device=logits.device, dtype=logits.dtype).unsqueeze(0)
+            los_pos = targets * pw * torch.log(xs_pos.clamp(min=self.eps))
+        else:
+            los_pos = targets * torch.log(xs_pos.clamp(min=self.eps))
+        los_neg = (1.0 - targets) * torch.log(xs_neg.clamp(min=self.eps))
         loss = los_pos + los_neg
 
-        # Asymmetric Focusing
+        # Asymmetric Focusing (per-class gamma_neg: 1.0 cho No Finding, self.gamma_neg cho 14 bệnh)
         if self.gamma_neg > 0 or self.gamma_pos > 0:
-            # Dùng torch.no_grad() thay vì set_grad_enabled(False/True) để an toàn
-            # khi có exception — tránh tắt gradient vĩnh viễn cho toàn bộ training.
+            if self.no_finding_idx is not None and logits.ndim == 2 and logits.shape[1] > self.no_finding_idx:
+                gamma_neg_vec = torch.full((1, logits.shape[1]), float(self.gamma_neg), device=logits.device, dtype=logits.dtype)
+                gamma_neg_vec[0, self.no_finding_idx] = 1.0
+            else:
+                gamma_neg_vec = self.gamma_neg
+
             if self.disable_torch_grad_focal_loss:
                 with torch.no_grad():
-                    pt0 = xs_pos * targets
-                    pt1 = xs_neg * (1 - targets)
+                    pt0 = xs_pos * orig_targets
+                    pt1 = xs_neg * (1.0 - orig_targets)
                     pt = pt0 + pt1
-                    one_sided_gamma = self.gamma_pos * targets + self.gamma_neg * (1 - targets)
-                    one_sided_w = torch.pow(1 - pt, one_sided_gamma)
+                    one_sided_gamma = self.gamma_pos * orig_targets + gamma_neg_vec * (1.0 - orig_targets)
+                    one_sided_w = torch.pow((1.0 - pt).clamp(min=0.0), one_sided_gamma)
             else:
-                pt0 = xs_pos * targets
-                pt1 = xs_neg * (1 - targets)
+                pt0 = xs_pos * orig_targets
+                pt1 = xs_neg * (1.0 - orig_targets)
                 pt = pt0 + pt1
-                one_sided_gamma = self.gamma_pos * targets + self.gamma_neg * (1 - targets)
-                one_sided_w = torch.pow(1 - pt, one_sided_gamma)
-            loss *= one_sided_w
+                one_sided_gamma = self.gamma_pos * orig_targets + gamma_neg_vec * (1.0 - orig_targets)
+                one_sided_w = torch.pow((1.0 - pt).clamp(min=0.0), one_sided_gamma)
+            loss = loss * one_sided_w
 
         return -loss.sum() / logits.shape[0]
 
@@ -238,35 +305,69 @@ class DiceLoss(nn.Module):
 
 class AttentionSparsityLoss(nn.Module):
     """
-    Regularization áp dụng cho TOÀN BỘ batch (cả ảnh không có ground-truth mask),
-    nhằm chặn đường "trốn" của attention map mà Dice/Tversky loss không thấy được.
-
-    Gồm 2 thành phần:
-    1. L1 regularization: phạt mean activation — ép attention map thưa thớt
-       (vùng nền → 0). Khác biệt so với bản cũ (target_density=0.15 hai chiều):
-       bản cũ ép trung bình toàn bộ 15 kênh đạt 0.15, buộc model phải "bịa"
-       activation ở 13-14 kênh không có bệnh (hallucination). Bản mới chỉ
-       phạt L1 thuần (ép về 0), cho phép attention tự do kích hoạt ở bất kỳ
-       mức nào miễn là có tín hiệu Dice/BCE hỗ trợ.
-    2. Binary entropy: ép giá trị về gần 0 hoặc 1 (viền biên rõ) để
-       bản đồ attention dễ đọc khi hỗ trợ bác sĩ quan sát.
+    Class-Conditional Hinge Area Sparsity + Weakly-Supervised MIL Peak Regularization:
+    Giải quyết triệt để hiện tượng Attention Map Collapse ở Giai đoạn 2 (mean tụt từ 0.171 xuống 0.010):
+      1. Kênh bệnh âm tính (targets == 0): ép trung bình không gian về 0 (L1 background suppression).
+      2. Kênh bệnh dương tính (targets == 1):
+         - Hinge Area Sparsity: chỉ phạt diện tích khi mean vượt ngưỡng max_pos_area (0.30),
+           cho phép vùng tổn thương chiếm tới 30% diện tích ảnh mà không bị phạt về 0.
+         - MIL Spatial Peak Loss: khuyến khích đỉnh kích hoạt (spatial max) đạt ít nhất min_pos_peak (0.65),
+           cung cấp tín hiệu định vị yếu (weakly-supervised localization) cho cả ảnh NIH (không có bbox)
+           và 4 bệnh hoàn toàn không có bbox trong VinDr (Pneumonia, Edema, Emphysema, Hernia).
+      3. Binary Entropy: làm sắc nét biên bản đồ nhiệt (gần 0 hoặc gần 1).
     """
-    def __init__(self, l1_weight=0.1, entropy_weight=0.05):
+    def __init__(self, l1_weight=0.1, entropy_weight=0.05, peak_weight=0.05,
+                 max_pos_area=0.30, min_pos_peak=0.65):
         super(AttentionSparsityLoss, self).__init__()
         self.l1_weight = l1_weight
         self.entropy_weight = entropy_weight
+        self.peak_weight = peak_weight
+        self.max_pos_area = max_pos_area
+        self.min_pos_peak = min_pos_peak
 
-    def forward(self, attention_map):
-        # L1: phạt mean activation → ép các vùng không có tổn thương về 0
-        l1_loss = attention_map.mean()
-
+    def forward(self, attention_map, targets: Optional[torch.Tensor] = None, no_finding_idx: int = 0):
         # Binary entropy: ép pixel về phân cực (gần 0 hoặc gần 1)
         eps = 1e-4  # An toàn cho FP16
         a = attention_map.clamp(eps, 1 - eps)
         entropy = -(a * torch.log(a) + (1 - a) * torch.log(1 - a))
         entropy_loss = entropy.mean()
 
-        return self.l1_weight * l1_loss + self.entropy_weight * entropy_loss
+        if targets is None:
+            l1_loss = attention_map.mean()
+            return self.l1_weight * l1_loss + self.entropy_weight * entropy_loss
+
+        # Spatial mean và peak cho từng (sample, class): [N, C]
+        spatial_mean = attention_map.mean(dim=(2, 3))
+        spatial_peak = attention_map.amax(dim=(2, 3))
+
+        # Tách kênh bệnh dương tính và âm tính (bỏ qua kênh No Finding trong MIL peak)
+        t_bin = (targets > 0.5).float()
+        if 0 <= no_finding_idx < t_bin.shape[1]:
+            pos_disease_mask = t_bin.clone()
+            pos_disease_mask[:, no_finding_idx] = 0.0
+        else:
+            pos_disease_mask = t_bin
+        neg_mask = 1.0 - pos_disease_mask
+
+        # 1. Kênh âm tính: phạt L1 toàn phần về 0
+        neg_l1 = (spatial_mean * neg_mask).sum() / neg_mask.sum().clamp(min=1.0)
+
+        # 2. Kênh bệnh dương tính: Hinge area (chỉ phạt nếu tràn > max_pos_area) + MIL Peak (ép max >= min_pos_peak)
+        pos_count = pos_disease_mask.sum()
+        if pos_count > 0:
+            pos_hinge_area = (F.relu(spatial_mean - self.max_pos_area) * pos_disease_mask).sum() / pos_count
+            pos_peak_loss = (F.relu(self.min_pos_peak - spatial_peak) * pos_disease_mask).sum() / pos_count
+        else:
+            pos_hinge_area = attention_map.sum() * 0.0
+            pos_peak_loss = attention_map.sum() * 0.0
+
+        area_loss = neg_l1 + pos_hinge_area
+        return (
+            self.l1_weight * area_loss
+            + self.peak_weight * pos_peak_loss
+            + self.entropy_weight * entropy_loss
+        )
+
 
 class UncertaintyWeighting(nn.Module):
     """Kendall & Gal 2018 — Uncertainty-based automatic multi-task loss weighting.
@@ -301,6 +402,7 @@ class UncertaintyWeighting(nn.Module):
             total += weighted
             weighted_losses.append(weighted.item())
         return total, weighted_losses
+
 
 class HybridTrainer:
     CLASS_NAMES = [
@@ -348,13 +450,6 @@ class HybridTrainer:
         model = HybridCNNViTModel(num_classes=15, model_size=model_size, img_size=img_size).to(device)
         
         # Multi-GPU: ưu tiên DDP > DataParallel
-        #   DDP: mỗi GPU chạy 1 process riêng, không bị GIL bottleneck,
-        #        throughput gần tuyến tính theo số GPU.
-        #   DataParallel: dùng 1 process, bị GIL → chỉ hiệu quả ~60-70%.
-        #
-        # Để dùng DDP, khởi động bằng:
-        #   torchrun --nproc_per_node=N main.py
-        # Nếu không dùng torchrun, tự động fallback về DataParallel.
         use_ddp = False
         if torch.cuda.device_count() > 1:
             if 'LOCAL_RANK' in os.environ:
@@ -376,8 +471,6 @@ class HybridTrainer:
                       f"(dùng `torchrun --nproc_per_node={torch.cuda.device_count()} main.py` để tăng tốc với DDP)")
 
         # ── torch.compile (PyTorch 2.0+) ──
-        # Công tắc cứng: multi-GPU (DataParallel/DDP) có thể gây lỗi với
-        # torch.compile — chỉ bật khi use_torch_compile=True.
         if use_torch_compile and device.type == 'cuda' and hasattr(torch, 'compile'):
             try:
                 compile_target = _unwrap_model(model)
@@ -400,9 +493,6 @@ class HybridTrainer:
         if resume_path and os.path.isfile(resume_path):
             print(f"\n🔄 Resume từ checkpoint: {resume_path}")
             ckpt = load_checkpoint_safe(resume_path, device)
-            # M2 fix: Ưu tiên 'training_state_dict' (weights gốc) khi resume training.
-            # 'state_dict' chứa EMA weights (quá mượt, phá momentum dynamics).
-            # Backward-compatible: checkpoint cũ chỉ có 'state_dict' → dùng nó.
             if 'training_state_dict' in ckpt:
                 state_dict = extract_state_dict({'state_dict': ckpt['training_state_dict']})
                 print("ℹ️  Load TRAINING weights (không phải EMA) để resume training")
@@ -429,15 +519,6 @@ class HybridTrainer:
             print(f"⚠️  Không tìm thấy checkpoint tại '{resume_path}' — bắt đầu train mới.")
 
         # ---- Data Transforms (Geometric only for Training to keep Mask sync)
-        # Khi resume ở stage 2, model đã "thuộc bài" ảnh gốc → thêm nhiễu
-        # màu sắc (ColorJitter) và blur (GaussianBlur) để chống overfit.
-        #
-        # QUAN TRỌNG: Trong read_data.py, ảnh (3ch) được GHÉP với mask (15ch)
-        # thành tensor 18 kênh trước khi áp transform. Geometric transforms
-        # (Crop, Flip, Rotate, Affine) hoạt động bình thường trên mọi số kênh,
-        # nhưng ColorJitter/GaussianBlur YÊU CẦU 1 hoặc 3 kênh.
-        # → Dùng wrapper ImageOnlyTransform để CHỈ áp color augmentation lên
-        # 3 kênh đầu (ảnh), bỏ qua 15 kênh sau (mask).
         class ImageOnlyTransform(torch.nn.Module):
             """Áp dụng transform chỉ lên 3 kênh ảnh đầu tiên của tensor combined."""
             def __init__(self, transform):
@@ -449,11 +530,6 @@ class HybridTrainer:
                 img = self.transform(img)
                 return torch.cat([img, mask], dim=0)
 
-        # Tạo SẴN cả 2 bộ transform cho Stage 1 và Stage 2.
-        # Stage 1: chỉ geometric (crop, flip, rotate, affine)
-        # Stage 2: geometric + color augmentation (ColorJitter, GaussianBlur)
-        # BUG FIX: Trước đây color_augs chỉ bật khi resume_stage==2 (cố định),
-        # khiến Stage 2 khi train từ đầu (Mode 1) không bao giờ có color augmentation.
         _base_geometric = [
             transforms.RandomResizedCrop(img_size, scale=(0.75, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
@@ -509,7 +585,6 @@ class HybridTrainer:
         )
         
         # DataLoader GĐ2 (Hybrid 1:3 Batch Sampler)
-        # Phải dùng batch_sampler= vì HybridBatchSampler yield cả batch (list of indices)
         hybrid_sampler = HybridBatchSampler(datasetTrain.sources, trBatchSize)
         loader_stage2 = FastDataLoader.create_dataloader(
             datasetTrain, batch_size=trBatchSize, num_workers=num_workers, batch_sampler=hybrid_sampler
@@ -521,45 +596,48 @@ class HybridTrainer:
         )
 
         # ---- Optimizers & Loss
-        # Discriminative LR: head mới (attention_head, fpn_lateral, fpn_merge)
-        # khởi tạo ngẫu nhiên → cần LR cao hơn (5e-4) để bắt kịp backbone đã pretrained.
-        # Backbone (ConvNeXtV2, SwinV2) giữ LR thấp (1e-4) để không phá pretrained features.
-        raw_model = _unwrap_model(model)
-        head_params_ids = set(
-            id(p) for p in list(raw_model.attention_head.parameters())
-            + list(raw_model.fpn_lateral.parameters())
-            + list(raw_model.fpn_merge.parameters())
+        # Discriminative LR + chuẩn tách decay / no_decay:
+        #   - Backbone: 1e-4 (Stage 1) -> hạ xuống 6e-5 (Base) / 5e-5 (Large) khi sang Stage 2
+        #   - Head (attention_head, fpn_lateral, fpn_merge, classifier, channel_proj, gate_alpha_raw): 5e-4
+        #   - Không áp weight_decay=0.05 lên 1D bias, LayerNorm/BatchNorm/GroupNorm, gate_alpha_raw
+        init_backbone_lr = 1e-4 if resume_stage == 1 else (8e-5 if model_size == 'base' else 5e-5)
+        init_head_lr = 5e-4 if resume_stage == 1 else 2e-4
+        param_groups = build_optimizer_param_groups(
+            model, backbone_lr=init_backbone_lr, head_lr=init_head_lr, weight_decay=0.05
         )
-        backbone_params = [p for p in model.parameters() if id(p) not in head_params_ids]
-        head_params = [p for p in model.parameters() if id(p) in head_params_ids]
-        optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': 1e-4},
-            {'params': head_params, 'lr': 5e-4},
-        ], weight_decay=0.05)
+        optimizer = optim.AdamW(param_groups, weight_decay=0.05)
 
-        # ASL thay thế BCE: giảm trọng số các ca âm tính dễ, tập trung vào
-        # ca dương tính và ca khó → đặc biệt hiệu quả khi positive rate < 5%
-        # như dữ liệu X-quang (Hernia ~0.2%, Emphysema ~2%).
-        criterion_bce = AsymmetricLossOptimized(gamma_neg=4, gamma_pos=0, clip=0.05)
+        # Tính mild positive weights từ tần suất lớp của tập Train:
+        # w_c = clip(((1 - f_c) / f_c)^0.15, 1.0, 2.5) giúp tăng lực học cho Hernia (0.18%),
+        # Pneumonia (1.12%), Edema (1.83%), Emphysema (2.01%) mà không phá calibration.
+        no_finding_idx = HybridTrainer.CLASS_NAMES.index('No Finding')
+        freqs = datasetTrain.class_frequencies.clamp(min=1e-4, max=1.0 - 1e-4)
+        pos_weights = torch.pow((1.0 - freqs) / freqs, 0.15).clamp(min=1.0, max=2.5)
+        pos_weights[no_finding_idx] = 1.0
+
+        criterion_bce = AsymmetricLossOptimized(
+            gamma_neg=4, gamma_pos=0, clip=0.05,
+            pos_weights=pos_weights.to(device), no_finding_idx=no_finding_idx
+        )
         # Giữ BCEWithLogitsLoss riêng cho validation để có val loss comparable
         criterion_val = nn.BCEWithLogitsLoss()
         criterion_dice = DiceLoss()
         criterion_sparsity = AttentionSparsityLoss()
 
-        # Uncertainty weighting: tự động cân bằng trọng số BCE, Dice, Sparsity
-        # QUAN TRỌNG: phải add_param_group TRƯỚC khi tạo scheduler, vì scheduler
-        # ghi nhận số param groups lúc khởi tạo. Nếu add sau → scheduler chỉ
-        # tạo LR cho 1 group nhưng optimizer có 2 → crash khi scheduler.step().
-        uncertainty_weights = UncertaintyWeighting(n_tasks=2).to(device)  # Chỉ ASL + Dice (Sparsity là regularizer, không phải task)
-        optimizer.add_param_group({'params': uncertainty_weights.parameters(), 'lr': 1e-3})
+        # Uncertainty weighting: tự động cân bằng trọng số ASL và Dice (weight_decay=0.0)
+        uncertainty_weights = UncertaintyWeighting(n_tasks=2).to(device)
+        optimizer.add_param_group({
+            'params': uncertainty_weights.parameters(),
+            'lr': 1e-3,
+            'weight_decay': 0.0,
+            'group_name': 'uncertainty_weights'
+        })
 
         # Scheduler: warmup chỉ áp dụng khi bắt đầu stage 1 từ đầu.
-        # Nếu resume vào stage 2 thì dùng CosineAnnealingLR thuần — model đã ổn định,
-        # warmup lại từ lr=1e-5 sẽ làm chậm không cần thiết.
         if resume_stage == 2:
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=max(1, trMaxEpoch),
+                T_max=max(1, min(12, trMaxEpoch)),
                 eta_min=1e-6
             )
         else:
@@ -568,7 +646,7 @@ class HybridTrainer:
                 optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
             )
             cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=max(1, trMaxEpoch - warmup_epochs), eta_min=1e-6
+                optimizer, T_max=max(1, min(15, trMaxEpoch) - warmup_epochs), eta_min=1e-6
             )
             scheduler = optim.lr_scheduler.SequentialLR(
                 optimizer, schedulers=[warmup_scheduler, cosine_scheduler],
@@ -576,14 +654,11 @@ class HybridTrainer:
             )
 
         # ── EMA: khởi tạo từ trọng số hiện tại (đã load checkpoint nếu resume) ──
-        # Khi resume, state_dict trong checkpoint đã chứa EMA weights (được lưu
-        # bằng cách ghi đè params trong full_state). Model đã load state_dict đó,
-        # nên EMA khởi tạo từ model.named_parameters() sẽ tự động có EMA weights.
         target_model_ref = _unwrap_model(model)
         ema = ModelEMA(target_model_ref, decay=0.999)
         if resume_path and os.path.isfile(resume_path):
             print("ℹ️  EMA khởi tạo từ checkpoint weights (đã chứa EMA params)")
-        print(f"🎯 ASL: gamma_neg={criterion_bce.gamma_neg}, gamma_pos={criterion_bce.gamma_pos}, clip={criterion_bce.clip}")
+        print(f"🎯 ASL: gamma_neg={criterion_bce.gamma_neg} (NoFinding=1.0), gamma_pos={criterion_bce.gamma_pos}, clip={criterion_bce.clip}")
         print(f"📊 EMA: decay={ema.decay}")
 
         # ── Khôi phục trạng thái optimizer/scheduler/scaler/uncertainty từ checkpoint ──
@@ -598,7 +673,6 @@ class HybridTrainer:
                     print(f"⚠️  Không load được optimizer state: checkpoint có {saved_n} groups, "
                           f"hiện tại có {current_n} groups")
                     print(f"   AdamW khởi tạo lại momentum — model weights vẫn nguyên vẹn")
-                    print(f"   Warmup scheduler sẽ bù đắp trong 3 epoch đầu")
             else:
                 print("⚠️  Checkpoint cũ không chứa optimizer state — AdamW khởi tạo lại momentum")
 
@@ -611,17 +685,10 @@ class HybridTrainer:
 
             if 'scheduler_state_dict' in resume_ckpt:
                 try:
-                    # Kiểm tra tương thích: scheduler state từ checkpoint phải khớp
-                    # số param groups hiện tại. Nếu optimizer đổi cấu trúc (vd thêm
-                    # discriminative LR → 3 groups thay vì 2), scheduler cũ sẽ crash
-                    # tại step() vì zip(param_groups, lr_values) lệch kích thước.
                     saved_sched = resume_ckpt['scheduler_state_dict']
                     n_optimizer_groups = len(optimizer.param_groups)
-                    # SequentialLR lưu base_lrs trong sub-schedulers, không trực tiếp
-                    # Kiểm tra qua _last_lr hoặc base_lrs của scheduler con
                     sched_compatible = True
                     if hasattr(scheduler, '_schedulers'):
-                        # SequentialLR: kiểm tra sub-scheduler đầu tiên
                         for sub_sched_state in saved_sched.get('_schedulers', []):
                             if 'base_lrs' in sub_sched_state and len(sub_sched_state['base_lrs']) != n_optimizer_groups:
                                 sched_compatible = False
@@ -641,8 +708,6 @@ class HybridTrainer:
             if 'uncertainty_weights_state_dict' in resume_ckpt:
                 try:
                     saved_uw = resume_ckpt['uncertainty_weights_state_dict']
-                    # Xử lý migration: checkpoint cũ có 3 log_vars (ASL, Dice, Sparsity)
-                    # nhưng model mới chỉ cần 2 (ASL, Dice). Lấy 2 giá trị đầu.
                     saved_log_vars = saved_uw.get('log_vars', None)
                     current_n = uncertainty_weights.log_vars.data.shape[0]
                     if saved_log_vars is not None and saved_log_vars.shape[0] != current_n:
@@ -666,17 +731,8 @@ class HybridTrainer:
         current_loader = loader_stage1 if stage == 1 else loader_stage2
         stage1_streak = 0
 
-        # Early stopping: tách patience riêng cho từng stage.
-        # Stage 1 (warm-up attention): patience cao hơn vì Dice cần nhiều epoch để
-        # giảm dần từ baseline cao (~0.85) về ngưỡng chuyển stage, và val AUROC thường
-        # thấp hơn thực lực (val set có ~89% ảnh NIH mà stage 1 chưa học). Cắt sớm ở
-        # stage 1 lãng phí toàn bộ công sức warm-up attention.
-        # Stage 2 (toàn bộ dữ liệu): patience thấp hơn vì mỗi epoch ~1.5h rất tốn kém.
         patience_stage1 = 10
-        # Tăng patience stage 2 từ 5→8: khi đổi từ BCE sang ASL, 1-2 epoch đầu
-        # AUROC có thể tạm giảm nhẹ trước khi bứt phá (gradient landscape thay
-        # đổi). Cần đủ patience để không early stop sớm trong giai đoạn thích nghi.
-        patience_stage2 = 8
+        patience_stage2 = 6
         early_stop_patience = patience_stage1 if stage == 1 else patience_stage2
         epochs_no_improve = 0
 
@@ -696,7 +752,6 @@ class HybridTrainer:
                 ddp_sampler_val.set_epoch(global_epoch)
 
             # Train
-            no_finding_idx = HybridTrainer.CLASS_NAMES.index('No Finding')
             trainLoss, bceLoss, diceLoss, sparsityLoss, rawDice = HybridTrainer.epochTrain(
                 model, current_loader, optimizer, criterion_bce, criterion_dice, criterion_sparsity, device, stage,
                 no_finding_idx=no_finding_idx, scaler=scaler, amp_dtype=amp_dtype, ema=ema, uncertainty_weights=uncertainty_weights
@@ -715,7 +770,6 @@ class HybridTrainer:
             if uncertainty_weights is not None:
                 log_vars = uncertainty_weights.log_vars.data.tolist()
                 precisions = [float(torch.exp(-v).item()) for v in uncertainty_weights.log_vars.data]
-                # UW chỉ cân bằng 2 task: ASL + Dice. Sparsity là regularizer riêng.
                 print(f"\n🔧 UncertaintyWeighting log_vars: ASL={log_vars[0]:.3f}, Dice={log_vars[1]:.3f}")
                 print(f"   Precision (1/σ²):             ASL={precisions[0]:.3f}, Dice={precisions[1]:.3f}")
                 sparsity_w = 0.1 if stage == 1 else 0.05
@@ -728,22 +782,6 @@ class HybridTrainer:
 
             # Check Stage Transition
             if stage == 1:
-                # Điều kiện chuyển stage 1 → 2 chỉ dựa trên DICE là chính:
-                #
-                # Lý do BỎ ngưỡng AUROC tuyệt đối (> 0.75):
-                # Val set có ~89% ảnh NIH mà Stage 1 (chỉ train trên VinDr) chưa từng
-                # học -> AUROC trên val không phản ánh đúng chất lượng attention đã học.
-                # Yêu cầu AUROC > 0.75 là không thể đạt được ở stage 1 với cấu hình dữ
-                # liệu này, bất kể attention có học tốt đến đâu.
-                #
-                # Thay vào đó: dùng Dice < ngưỡng làm điều kiện chính (đo trực tiếp
-                # chất lượng attention so với GT bbox) + AUROC cải thiện so với baseline
-                # đầu stage 1 (đo mô hình không bị overfit trên VinDr) + phải ổn định
-                # liên tiếp 2 epoch để tránh chuyển do dao động ngẫu nhiên.
-                #
-                # Ngưỡng Dice 0.65: đã kiểm chứng thực nghiệm, khi Dice < 0.65 với Focal
-                # Tversky (gamma=0.75), attention map đã định vị đúng không gian tổn thương
-                # ở mức có ý nghĩa (không chỉ đúng mật độ trung bình).
                 stage1_threshold_met = (diceLoss < 0.65) and (valAUROC > 0.68)
                 if stage1_threshold_met:
                     if not stage1_dice_met_ever:
@@ -760,37 +798,38 @@ class HybridTrainer:
                     print("\n🔓 Đạt ngưỡng tối ưu ổn định (2 epoch liên tiếp)! Chuyển sang Giai đoạn 2 (Toàn bộ dữ liệu + 1:3 Sampler)")
                     stage = 2
                     current_loader = loader_stage2
-                    # Đổi sang patience thấp hơn cho stage 2 (mỗi epoch ~1.5h)
                     early_stop_patience = patience_stage2
                     epochs_no_improve = 0  # reset để stage 2 có đủ patience
-                    # BUG FIX: Bật Color Augmentation cho Stage 2.
-                    # Dataset.__getitem__ đọc self.transform mỗi lần, gán lại giữa
-                    # chừng có hiệu lực ngay từ batch tiếp theo.
                     datasetTrain.transform = transformTrain_stage2
                     print("   ✅ Đã bật Color Augmentation (ColorJitter + GaussianBlur) cho Stage 2")
-                    # BUG FIX: KHÔNG tạo mới scheduler. Giữ nguyên scheduler cũ để
-                    # LR tiếp tục giảm theo đúng lịch trình Cosine, tránh nhảy lại
-                    # lên đỉnh gây overfit.
+
+                    # Recalibrate Learning Rate & CosineAnnealingLR cho Stage 2 (horizon ~10-12 epochs)
+                    # Tránh lỗi T_max=47 giữ backbone LR quá cao (~9e-5) gây overfit sau epoch 12.
+                    s2_backbone_lr = 8e-5 if model_size == 'base' else 5e-5
+                    s2_head_lr = 2e-4
+                    for pg in optimizer.param_groups:
+                        gname = pg.get('group_name', '')
+                        if gname.startswith('backbone'):
+                            pg['lr'] = s2_backbone_lr
+                        elif gname.startswith('head'):
+                            pg['lr'] = s2_head_lr
+                    remaining_s2 = max(1, min(12, trMaxEpoch - epoch - 1))
+                    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=remaining_s2, eta_min=1e-6
+                    )
+                    print(f"   📉 Stage 2 Cosine Scheduler: backbone_lr={s2_backbone_lr:.1e}, head_lr={s2_head_lr:.1e}, T_max={remaining_s2} epochs")
 
             # Save Model & Early Stopping
             if valAUROC > bestAUROC:
                 bestAUROC = valAUROC
                 epochs_no_improve = 0
                 
-                # DDP: chỉ rank 0 lưu checkpoint (tránh race condition ghi file)
                 if _is_main_process():
                     os.makedirs(os.path.dirname(pathModel) or '.', exist_ok=True)
 
-                    # M2 fix: Lưu CẢ training weights LẪN EMA weights riêng biệt.
-                    # - 'state_dict': EMA weights (dùng cho inference/test — tổng quát hơn)
-                    # - 'training_state_dict': training weights gốc (dùng khi resume training
-                    #   để bảo toàn momentum dynamics — EMA weights quá "mượt" để train tiếp)
                     ema_model = _unwrap_model(model)
-                    # Deep copy training state: state_dict() trả về references,
-                    # cần clone để tránh bị ảnh hưởng khi tạo ema_state bên dưới.
                     training_state = {k: v.clone() for k, v in ema_model.state_dict().items()}
 
-                    # Tạo EMA state bằng cách ghi đè params+buffers bằng EMA shadow
                     ema_state = {k: v.clone() for k, v in training_state.items()}
                     for name, ema_val in ema.shadow.items():
                         if name in ema_state:
@@ -828,7 +867,7 @@ class HybridTrainer:
                    no_finding_idx=0, scaler=None, amp_dtype=torch.float32, ema=None, uncertainty_weights=None):
         model.train()
         total_loss, total_bce, total_dice, total_sparsity = 0.0, 0.0, 0.0, 0.0
-        total_raw_dice = 0.0  # Tổng raw Dice score (không phải loss) để theo dõi overlap thực tế
+        total_raw_dice = 0.0
         n_dice_batches = 0
         attn_mean_sum, attn_std_sum = 0.0, 0.0
         
@@ -844,67 +883,39 @@ class HybridTrainer:
             with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                 logits, attention_maps = model(inputs)
 
-            # Tính loss ở FP32 để tránh lỗi NaN (bfloat16 precision khiến 1 - 1e-6 = 1.0 -> log(0) = NaN)
+            # Tính loss ở FP32 để tránh lỗi NaN
             logits = logits.float()
             attention_maps = attention_maps.float()
 
-            # Theo dõi mean/std của attention map toàn batch để phát hiện collapse
-            # (mô hình "lười" tô toàn 0 hoặc toàn 1 thay vì học vùng tổn thương thật)
             attn_mean_sum += attention_maps.mean().item()
             attn_std_sum += attention_maps.std().item()
             
             vin_mask = (source_flags == 1)
             
-            # Tính BCE cho tất cả
+            # Tính ASL cho tất cả
             bce_loss = criterion_bce(logits, targets.float())
             total_bce += bce_loss.item()
 
-            # Sparsity/Entropy regularization áp dụng cho TOÀN BỘ batch (kể cả ảnh
-            # NIH không có GT mask). Đây là phần then chốt chặn đường "trốn" mà
-            # Dice/Tversky không thấy được, vì Dice chỉ tính trên ~25% ảnh VinDr.
-            # Nếu không có dòng này, attention vẫn có thể collapse về ~1.0 trên 75%
-            # ảnh còn lại mà không bị phạt gì.
-            sparsity_loss = criterion_sparsity(attention_maps)
+            # Class-conditional Hinge Sparsity + MIL Peak Regularization
+            sparsity_loss = criterion_sparsity(attention_maps, targets.float(), no_finding_idx=no_finding_idx)
             total_sparsity += sparsity_loss.item()
             
             dice_loss_val = torch.tensor(0.0, device=device)
-            has_valid_dice = False  # Theo dõi: batch này có Dice data thực sự không?
-            # Tính Dice Loss cho VinDr - CHỈ trên các kênh THỰC SỰ có GT bbox.
-            # Quy tắc xác định kênh hợp lệ: với dữ liệu VinDr-CXR, mỗi nhãn dương
-            # (label=1) cho 1 bệnh LUÔN đi kèm bbox tương ứng (đã kiểm chứng trên
-            # dữ liệu thật: 100% dòng label=1 có bbox, trừ riêng "No Finding" -
-            # bệnh này không có khái niệm vùng tổn thương/bbox). Vì vậy: kênh k
-            # hợp lệ <=> targets[:, k] == 1 VÀ k != index của 'No Finding'.
+            has_valid_dice = False
             if vin_mask.sum() > 0:
                 vin_attention = attention_maps[vin_mask]      # [N_vin, 15, H, W]
                 vin_gt_masks = masks[vin_mask].float()        # [N_vin, 15, H, W]
 
-                # Tính valid_mask dựa trên mask thực tế SAU augmentation, thay vì
-                # label gốc. RandomResizedCrop/Affine/Rotation có thể đẩy bbox nhỏ
-                # ra ngoài khung hình → mask rỗng hoàn toàn dù label vẫn = 1.
-                # Nếu vẫn dùng label gốc, model bị phạt "không tìm thấy tổn thương"
-                # ở kênh mà bbox đã bị cắt mất → gradient mâu thuẫn, kẹt Dice.
                 valid_mask = (vin_gt_masks.sum(dim=(2, 3)) > 0)  # [N_vin, 15]
                 valid_mask[:, no_finding_idx] = False  # No Finding không có bbox
 
-                has_valid_dice = valid_mask.sum() > 0  # Có kênh bệnh thật sự có bbox
+                has_valid_dice = valid_mask.sum() > 0
                 dice_loss_val = criterion_dice(vin_attention, vin_gt_masks, valid_mask)
-                # C2 fix: Chỉ đếm batch dice khi CÓ kênh hợp lệ thật sự,
-                # tránh pha loãng avg_dice bằng các batch toàn "No Finding"
                 if has_valid_dice:
                     total_dice += dice_loss_val.item()
                     total_raw_dice += criterion_dice.last_raw_dice
                     n_dice_batches += 1
 
-            # Uncertainty weighting CHỈ cân bằng 2 task losses (ASL + Dice).
-            # Sparsity là regularizer (không phải task loss), được cộng riêng
-            # với trọng số cố định. Lý do: nếu nhét Sparsity vào UW, mạng
-            # sẽ "hack" bằng cách tắt Attention (Sparsity→0) rồi đẩy Precision
-            # lên vô cực → Total Loss âm vô cực → Attention collapse hoàn toàn.
-            #
-            # Trọng số Sparsity cố định:
-            # - Stage 1 (warm-up attention): 0.1 — phạt nhẹ, ưu tiên Dice học bbox
-            # - Stage 2 (toàn bộ dữ liệu):  0.05 — phạt rất nhẹ, ưu tiên ASL phân loại
             sparsity_weight = 0.1 if stage == 1 else 0.05
             
             if uncertainty_weights is not None:
@@ -920,14 +931,13 @@ class HybridTrainer:
             p_no_finding = probs_all[:, no_finding_idx]
             p_diseases = torch.cat([probs_all[:, :no_finding_idx], probs_all[:, no_finding_idx+1:]], dim=1)
             p_max_disease = p_diseases.max(dim=1)[0]
-            # Consistency penalty: p_no_finding * p_max_disease → 0 khi chỉ 1 trong 2 cao
             consistency_loss = (p_no_finding * p_max_disease).mean()
             loss = loss + consistency_loss * 0.1
                 
             # AMP backward + optimizer step + gradient clipping
             if scaler is not None:
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)  # Chuyển gradient về FP32 scale trước khi clip
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 if uncertainty_weights is not None:
                     torch.nn.utils.clip_grad_norm_(uncertainty_weights.parameters(), max_norm=1.0)
@@ -955,9 +965,6 @@ class HybridTrainer:
 
         avg_sparsity = total_sparsity / n_batches
 
-        # Luôn in mean/std của attention map để theo dõi tiến trình qua các epoch,
-        # không chỉ lúc cảnh báo - giúp thấy được attention đang "co lại" đúng
-        # hướng (mean giảm dần, std tăng dần) hay không.
         print(f"📐 Attention stats - mean: {avg_attn_mean:.3f} | std: {avg_attn_std:.3f}")
         if avg_attn_std < 0.05:
             print(f"⚠️  CẢNH BÁO: Attention map có dấu hiệu collapse "
@@ -970,16 +977,6 @@ class HybridTrainer:
 
     @staticmethod
     def epochVal(model, dataLoader, criterion_bce, device, amp_dtype=torch.float32, use_tta=False):
-        """
-        Validation với hỗ trợ Test-Time Augmentation (TTA).
-        
-        Khi use_tta=True, mỗi ảnh được chạy qua model 2 lần:
-        1. Ảnh gốc
-        2. Ảnh lật ngang (horizontal flip)
-        Kết quả = trung bình xác suất của 2 lần → ổn định hơn, AUROC +0.3-0.5%.
-        
-        Chi phí: thêm ~3 phút/epoch validation (1 forward pass nữa).
-        """
         model.eval()
         total_loss = 0.0
         allPreds, allTargets = [], []
@@ -995,15 +992,12 @@ class HybridTrainer:
                 logits = logits.float()
                 
                 if use_tta:
-                    # TTA: lật ngang ảnh và lấy trung bình PROBABILITIES (không phải logits)
-                    # vì sigmoid là hàm phi tuyến: sigmoid((a+b)/2) ≠ (sigmoid(a)+sigmoid(b))/2
                     with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                         logits_flip, _ = model(torch.flip(inputs, dims=[3]))
                     logits_flip = logits_flip.float()
                     avg_probs = (torch.sigmoid(logits) + torch.sigmoid(logits_flip)) / 2.0
                 
-                loss = criterion_bce(logits, targets.float())  # Val loss tính trên logits gốc
-                
+                loss = criterion_bce(logits, targets.float())
                 total_loss += loss.item()
                 
                 if use_tta:
@@ -1018,13 +1012,11 @@ class HybridTrainer:
         auroc = HybridTrainer.computeAUROC_mean(allTargets, allPreds)
         acc = accuracy_score(allTargets.flatten(), (allPreds >= 0.5).astype(int).flatten())
         
-        # Debug: khi AUROC bất thường thấp, in thống kê để chẩn đoán
         if auroc <= 0.55 or np.isnan(auroc):
             print(f"\n🔍 DEBUG AUROC={auroc:.4f} — Kiểm tra predictions:")
             print(f"   Pred range: [{allPreds.min():.6f}, {allPreds.max():.6f}]")
             print(f"   Pred mean:  {allPreds.mean():.6f} | std: {allPreds.std():.6f}")
             print(f"   Target sum per class: {allTargets.sum(axis=0).astype(int).tolist()}")
-            # Kiểm tra xem model có dự đoán constant cho mọi sample không
             pred_std_per_class = allPreds.std(axis=0)
             collapsed = (pred_std_per_class < 1e-4).sum()
             print(f"   Collapsed classes (std<1e-4): {collapsed}/{allPreds.shape[1]}")
