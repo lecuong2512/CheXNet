@@ -623,147 +623,204 @@ def benchmark_hardware_and_architecture(
 
 
 # ==============================================================================
-# Part 3: Full Test Set Head-to-Head Evaluation (Base vs Large vs Ensemble)
+# Part 3: Full Test Set Head-to-Head Evaluation (N models + Ensembles)
 # ==============================================================================
 
+def _run_test_inference(ckpt_path: str, data_dir: str, test_csv: str, img_size: int,
+                        batch_size: int, tta_views: int, num_workers: int = 8):
+    """Chạy inference trên toàn bộ test set với Multi-Resolution TTA.
+    Trả về (probs [N, 15], labels [N, 15], model_size)."""
+    import torch.nn.functional as F
+    import torchvision.transforms as transforms
+    from tqdm import tqdm
+    from read_data import DatasetGenerator, FastDataLoader
+    from checkpoint_utils import load_checkpoint_safe, extract_state_dict
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    ckpt = load_checkpoint_safe(ckpt_path, device)
+    model_size = ckpt.get('model_size', 'large')
+    ckpt_img = ckpt.get('img_size', img_size)
+    print(f"   • {os.path.basename(ckpt_path)}: model_size={model_size}, img_size={ckpt_img}, "
+          f"epoch={ckpt.get('epoch', '?')}, best_val_auroc={ckpt.get('best_auroc', 0.0):.4f}")
+
+    model = HybridCNNViTModel(num_classes=15, model_size=model_size, img_size=ckpt_img, pretrained=False).to(device)
+    model.load_state_dict(extract_state_dict(ckpt), strict=True)
+    model.eval()
+    del ckpt
+
+    outer = int(ckpt_img * 1.14)
+    margin = (outer - ckpt_img) // 2
+    ds = DatasetGenerator(data_dir, test_csv, transforms.Compose([transforms.Resize((outer, outer))]))
+    dl = FastDataLoader.create_dataloader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+    use_amp = device.type == 'cuda' and torch.cuda.get_device_capability(0) >= (8, 0)
+    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+
+    all_p, all_y = [], []
+    with torch.no_grad():
+        for x_outer, y, _, _ in tqdm(dl, desc=f"Test {model_size.upper()} ({tta_views}-view TTA)", ncols=100):
+            x_outer = x_outer.to(device, non_blocking=True)
+            x_crop = x_outer[:, :, margin:margin + ckpt_img, margin:margin + ckpt_img]
+            with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+                lg, _ = model(x_crop)
+                p = torch.sigmoid(lg.float())
+                if tta_views >= 2:
+                    lg, _ = model(torch.flip(x_crop, dims=[3]))
+                    p = p + torch.sigmoid(lg.float())
+                if tta_views >= 4:
+                    x_full = F.interpolate(x_outer, size=(ckpt_img, ckpt_img), mode='bilinear', align_corners=False)
+                    lg, _ = model(x_full)
+                    p = p + torch.sigmoid(lg.float())
+                    lg, _ = model(torch.flip(x_full, dims=[3]))
+                    p = p + torch.sigmoid(lg.float())
+            all_p.append((p / float(tta_views)).cpu())
+            all_y.append(y.float().cpu())
+
+    del model
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+    return torch.cat(all_p).numpy(), torch.cat(all_y).numpy(), model_size
+
+
+def _per_class_auroc(y, p):
+    out = []
+    for c in range(y.shape[1]):
+        if len(np.unique(y[:, c])) < 2:
+            out.append(np.nan)
+        else:
+            out.append(roc_auc_score(y[:, c], p[:, c]))
+    return np.array(out)
+
+
 def run_head_to_head_evaluation(
-    base_ckpt: str,
-    large_ckpt: str,
+    models: Dict[str, str],
     data_dir: str,
     test_csv: str,
     save_dir: str,
     img_size: int = 384,
     batch_size: int = 8,
-    tta_views: int = 4
+    tta_views: int = 4,
+    n_bootstraps: int = 1000,
+    num_workers: int = 8,
 ):
     """
-    Evaluate Base, Large, and Ensemble on the full Test Set.
-    Computes AUROC, PR-AUC, F1@Thr*, Bootstrap 95% CI (N=1000), and paired p-values.
+    Đánh giá N checkpoint + các tổ hợp Ensemble (trung bình xác suất đồng trọng số)
+    trên toàn bộ Test Set: per-class AUROC / PR-AUC, Mean AUROC (15 lớp & 14 bệnh),
+    Bootstrap 95% CI và paired bootstrap p-value so với model đơn tốt nhất.
     """
+    from itertools import combinations
+    from sklearn.metrics import average_precision_score
+
     print("\n" + "=" * 80)
     print("🏆 PART 3: FULL TEST SET HEAD-TO-HEAD EVALUATION")
     print("=" * 80)
 
-    preds_base_file = os.path.join(save_dir, 'preds_base.npy')
-    preds_large_file = os.path.join(save_dir, 'preds_large.npy')
-    labels_file = os.path.join(save_dir, 'labels_test.npy')
-
-    can_eval = False
-
-    # Check if precomputed predictions exist
-    if os.path.exists(preds_base_file) and os.path.exists(preds_large_file) and os.path.exists(labels_file):
-        print(f"Loading precomputed predictions from {save_dir} ...")
-        preds_base = np.load(preds_base_file)
-        preds_large = np.load(preds_large_file)
-        labels = np.load(labels_file)
-        can_eval = True
-    else:
-        # Check if checkpoints and image files exist
-        has_base_ckpt = os.path.exists(base_ckpt)
-        has_large_ckpt = os.path.exists(large_ckpt)
-        has_images = os.path.exists(data_dir) and any(
-            f.lower().endswith(('.png', '.jpg', '.jpeg'))
-            for f in os.listdir(data_dir)
-        )
-
-        if not has_base_ckpt or not has_large_ckpt or not has_images:
-            print("\n⚠️  SKIPPING Full Test Inference:")
-            if not has_base_ckpt:
-                print(f"   • Missing Base checkpoint: {base_ckpt}")
-            if not has_large_ckpt:
-                print(f"   • Missing Large checkpoint: {large_ckpt}")
-            if not has_images:
-                print(f"   • No X-ray images found in local '{data_dir}/' directory (data is stored on Colab/Drive/Kaggle).")
-            print("   -> Fallback completed cleanly. To run Part 3 evaluation in the future:")
-            print("      Place 'hybrid_base.pth' and 'hybrid_model.pth' in 'Trainedmodel/', download test images into 'Database/',")
-            print("      and run 'python compare_models.py'.")
-            return
-
-    # If predictions are available, perform statistical analysis
-    print("\nComputing Per-Class AUROC, PR-AUC, Optimal F1, and Bootstrap 95% CIs (N=1000)...")
-    np.random.seed(42)
-    n_samples, n_classes = labels.shape
-    n_bootstraps = 1000
-
-    ensemble_preds_fixed = 0.4 * preds_base + 0.6 * preds_large
-
-    results = []
-    for c in range(n_classes):
-        cname = DISEASE_CLASSES[c]
-        y_true = labels[:, c]
-        if len(np.unique(y_true)) < 2:
+    # ---- 1. Inference (cache .npy theo tên model để không phải chạy lại) ----
+    preds, labels = {}, None
+    for name, path in models.items():
+        cache = os.path.join(save_dir, f'preds_{name}_tta{tta_views}.npy')
+        labels_cache = os.path.join(save_dir, 'labels_test.npy')
+        if os.path.exists(cache) and os.path.exists(labels_cache):
+            print(f"   • {name}: dùng predictions đã cache ({cache})")
+            preds[name] = np.load(cache)
+            labels = np.load(labels_cache)
             continue
+        if not os.path.exists(path):
+            print(f"   ⚠️  Bỏ qua {name}: không tìm thấy checkpoint {path}")
+            continue
+        p, y, _ = _run_test_inference(path, data_dir, test_csv, img_size, batch_size, tta_views, num_workers)
+        np.save(cache, p)
+        np.save(labels_cache, y)
+        preds[name], labels = p, y
 
-        # Base metrics
-        auc_b = roc_auc_score(y_true, preds_base[:, c])
-        p_b, r_b, thrs_b = precision_recall_curve(y_true, preds_base[:, c])
-        prauc_b = auc(r_b, p_b)
+    if labels is None or len(preds) == 0:
+        print("⚠️  Không có model nào để đánh giá (thiếu checkpoint hoặc ảnh test).")
+        return None
 
-        # Large metrics
-        auc_l = roc_auc_score(y_true, preds_large[:, c])
-        p_l, r_l, thrs_l = precision_recall_curve(y_true, preds_large[:, c])
-        prauc_l = auc(r_l, p_l)
+    # ---- 2. Tạo các tổ hợp ensemble (trung bình đồng trọng số) ----
+    names = list(preds.keys())
+    systems = dict(preds)
+    for k in range(2, len(names) + 1):
+        for combo in combinations(names, k):
+            systems['ENS[' + '+'.join(combo) + ']'] = np.mean([preds[n] for n in combo], axis=0)
 
-        # Ensemble metrics
-        auc_e = roc_auc_score(y_true, ensemble_preds_fixed[:, c])
-        p_e, r_e, thrs_e = precision_recall_curve(y_true, ensemble_preds_fixed[:, c])
-        prauc_e = auc(r_e, p_e)
+    # ---- 3. Point estimates ----
+    n, C = labels.shape
+    rows, per_class = [], {}
+    for sname, p in systems.items():
+        auc_c = _per_class_auroc(labels, p)
+        per_class[sname] = auc_c
+        ap_c = np.array([average_precision_score(labels[:, c], p[:, c]) if labels[:, c].sum() > 0 else np.nan
+                         for c in range(C)])
+        rows.append({'System': sname,
+                     'Mean_AUROC_15': np.nanmean(auc_c),
+                     'Mean_AUROC_14_diseases': np.nanmean(auc_c[1:]),
+                     'Mean_PRAUC_15': np.nanmean(ap_c)})
 
-        # Bootstrap for 95% CI and p-values
-        boot_diffs_lb = []
-        boot_diffs_el = []
-        for _ in range(n_bootstraps):
-            idx = np.random.randint(0, n_samples, n_samples)
-            if len(np.unique(y_true[idx])) < 2:
-                continue
-            b_auc = roc_auc_score(y_true[idx], preds_base[idx, c])
-            l_auc = roc_auc_score(y_true[idx], preds_large[idx, c])
-            e_auc = roc_auc_score(y_true[idx], ensemble_preds_fixed[idx, c])
-            boot_diffs_lb.append(l_auc - b_auc)
-            boot_diffs_el.append(e_auc - l_auc)
+    # ---- 4. Paired bootstrap (cùng chỉ số mẫu cho mọi hệ thống) ----
+    best_single = max(names, key=lambda s: np.nanmean(per_class[s]))
+    print(f"\n⏳ Bootstrap {n_bootstraps} lần (paired) cho {len(systems)} hệ thống... (model đơn tốt nhất: {best_single})")
+    rng = np.random.RandomState(42)
+    boot = {s: [] for s in systems}
+    for _ in range(n_bootstraps):
+        idx = rng.randint(0, n, n)
+        yb = labels[idx]
+        valid = [c for c in range(C) if 0 < yb[:, c].sum() < len(idx)]
+        for s, p in systems.items():
+            boot[s].append(np.mean([roc_auc_score(yb[:, c], p[idx, c]) for c in valid]))
+    ref = np.array(boot[best_single])
+    for r in rows:
+        b = np.array(boot[r['System']])
+        r['CI95_low'], r['CI95_high'] = np.percentile(b, [2.5, 97.5])
+        diff = b - ref
+        r['Delta_vs_best_single'] = r['Mean_AUROC_15'] - np.nanmean(per_class[best_single])
+        r['P_value_vs_best_single'] = np.nan if r['System'] == best_single else float(np.mean(diff <= 0))
 
-        p_val_lb = np.mean(np.array(boot_diffs_lb) <= 0)
-        p_val_el = np.mean(np.array(boot_diffs_el) <= 0)
-        ci_l = (np.percentile(boot_diffs_lb, 2.5), np.percentile(boot_diffs_lb, 97.5))
+    summary = pd.DataFrame(rows).sort_values('Mean_AUROC_15', ascending=False)
+    summary_csv = os.path.join(save_dir, 'test_summary_all_systems.csv')
+    summary.round(4).to_csv(summary_csv, index=False)
 
-        results.append({
-            'Disease': cname,
-            'Base_AUROC': round(auc_b, 4),
-            'Large_AUROC': round(auc_l, 4),
-            'Ensemble_AUROC': round(auc_e, 4),
-            'Delta_Large_Base': round(auc_l - auc_b, 4),
-            'P_Val_Large_vs_Base': round(p_val_lb, 4),
-            'P_Val_Ensemble_vs_Large': round(p_val_el, 4),
-            'Base_PRAUC': round(prauc_b, 4),
-            'Large_PRAUC': round(prauc_l, 4),
-            'Ensemble_PRAUC': round(prauc_e, 4),
-        })
+    pc_df = pd.DataFrame(per_class, index=DISEASE_CLASSES).T.round(4)
+    pc_csv = os.path.join(save_dir, 'test_per_class_auroc_all_systems.csv')
+    pc_df.to_csv(pc_csv)
 
-    eval_df = pd.DataFrame(results)
-    eval_csv = os.path.join(save_dir, 'head_to_head_test_metrics.csv')
-    eval_df.to_csv(eval_csv, index=False)
-    print(f"✅ Saved head-to-head metrics: {eval_csv}")
+    # ---- 5. In kết quả ----
+    print("\n" + "=" * 80)
+    print(f"📊 TỔNG HỢP TEST SET ({n:,} ảnh, {tta_views}-view TTA) — sắp xếp theo Mean AUROC")
+    print("=" * 80)
+    print(f"  {'Hệ thống':<34} {'AUROC15':>8} {'AUROC14':>8} {'95% CI':>17} {'Δ':>8} {'p':>6}")
+    for _, r in summary.iterrows():
+        pv = '' if np.isnan(r['P_value_vs_best_single']) else f"{r['P_value_vs_best_single']:.3f}"
+        print(f"  {r['System']:<34} {r['Mean_AUROC_15']:>8.4f} {r['Mean_AUROC_14_diseases']:>8.4f} "
+              f"[{r['CI95_low']:.4f},{r['CI95_high']:.4f}] {r['Delta_vs_best_single']:>+8.4f} {pv:>6}")
+    print("  (Δ và p so với model đơn tốt nhất; p = tỷ lệ bootstrap mà hệ thống KHÔNG tốt hơn)")
 
-    # Plot Comparison Chart
-    fig, ax = plt.subplots(figsize=(14, 8))
-    y_idx = np.arange(len(eval_df))
-    h = 0.25
-    ax.barh(y_idx - h, eval_df['Base_AUROC'], height=h, label='Base Model', color='#4fa8d1')
-    ax.barh(y_idx, eval_df['Large_AUROC'], height=h, label='Large Model', color='#2b5c8f')
-    ax.barh(y_idx + h, eval_df['Ensemble_AUROC'], height=h, label='Ensemble (0.4B + 0.6L)', color='#27ae60')
+    print("\n📋 Per-class AUROC:")
+    print(pc_df.T.to_string())
+    print(f"\n✅ Saved: {summary_csv}\n✅ Saved: {pc_csv}")
+
+    # ---- 6. Biểu đồ: các model đơn + ensemble tốt nhất ----
+    best_ens = summary[summary['System'].str.startswith('ENS')]['System'].head(1).tolist()
+    show = names + best_ens
+    fig, ax = plt.subplots(figsize=(14, 9))
+    y_idx = np.arange(C)
+    h = 0.8 / len(show)
+    for i, s in enumerate(show):
+        ax.barh(y_idx + (i - (len(show) - 1) / 2) * h, per_class[s], height=h,
+                label=f"{s} ({np.nanmean(per_class[s]):.4f})")
     ax.set_yticks(y_idx)
-    ax.set_yticklabels(eval_df['Disease'], fontsize=10, fontweight='bold')
+    ax.set_yticklabels(DISEASE_CLASSES, fontsize=10, fontweight='bold')
     ax.invert_yaxis()
     ax.set_xlim(0.65, 1.0)
     ax.set_xlabel('Test AUROC', fontsize=11, fontweight='bold')
-    ax.set_title('Head-to-Head Test Set AUROC: Base vs Large vs Ensemble', fontsize=13, fontweight='bold', pad=12)
-    ax.legend(loc='lower left', frameon=True)
+    ax.set_title(f'Per-class Test AUROC ({tta_views}-view TTA)', fontsize=13, fontweight='bold')
+    ax.legend(loc='lower left', frameon=True, fontsize=9)
     ax.grid(axis='x', linestyle='--', alpha=0.5)
-
     plot_file = os.path.join(save_dir, 'head_to_head_auroc_comparison.png')
     plt.savefig(plot_file, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"✅ Generated head-to-head comparison plot: {plot_file}")
+    return summary
 
 
 # ==============================================================================
@@ -796,6 +853,12 @@ def main():
                         help='Number of TTA views for inference (default: 4)')
     parser.add_argument('--hardware-only', action='store_true',
                         help='Run only dataset audit and hardware benchmark')
+    parser.add_argument('--large-v1-ckpt', type=str, default=None,
+                        help='(Tùy chọn) checkpoint Large cũ (v1) để so sánh & ensemble')
+    parser.add_argument('--extra', type=str, nargs='*', default=[],
+                        help='(Tùy chọn) thêm checkpoint dạng ten=duong_dan.pth')
+    parser.add_argument('--num-workers', type=int, default=8, help='DataLoader workers')
+    parser.add_argument('--n-bootstraps', type=int, default=1000, help='Số lần bootstrap')
 
     args = parser.parse_args()
 
@@ -826,15 +889,23 @@ def main():
 
     # 3. Run Part 3: Test Set Evaluation (if not hardware-only)
     if not args.hardware_only:
+        models = {'base': args.base_ckpt, 'large': args.large_ckpt}
+        if args.large_v1_ckpt:
+            models['large_v1'] = args.large_v1_ckpt
+        for item in args.extra:
+            if '=' in item:
+                k, v = item.split('=', 1)
+                models[k.strip()] = v.strip()
         run_head_to_head_evaluation(
-            base_ckpt=args.base_ckpt,
-            large_ckpt=args.large_ckpt,
+            models=models,
             data_dir=args.data_dir,
             test_csv=args.test_csv,
             save_dir=args.save_dir,
             img_size=args.img_size,
             batch_size=args.batch_size,
-            tta_views=args.tta_views
+            tta_views=args.tta_views,
+            n_bootstraps=args.n_bootstraps,
+            num_workers=args.num_workers,
         )
     else:
         print("\n" + "=" * 80)
