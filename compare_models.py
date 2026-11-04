@@ -691,6 +691,20 @@ def _per_class_auroc(y, p):
             out.append(roc_auc_score(y[:, c], p[:, c]))
     return np.array(out)
 
+def _fast_auroc_matrix(y, p):
+    """AUROC cho tất cả các lớp cùng lúc bằng công thức Mann-Whitney U (ties dùng
+    average rank) — trùng khớp sklearn.roc_auc_score nhưng nhanh hơn ~50-100 lần.
+    Lớp chỉ có 1 giá trị nhãn trả về NaN."""
+    from scipy.stats import rankdata
+    ranks = rankdata(p, axis=0)
+    n_pos = y.sum(axis=0)
+    n_neg = y.shape[0] - n_pos
+    sum_pos_ranks = (ranks * y).sum(axis=0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        auc_c = (sum_pos_ranks - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    auc_c[(n_pos == 0) | (n_neg == 0)] = np.nan
+    return auc_c
+
 
 def run_head_to_head_evaluation(
     models: Dict[str, str],
@@ -760,14 +774,14 @@ def run_head_to_head_evaluation(
     # ---- 4. Paired bootstrap (cùng chỉ số mẫu cho mọi hệ thống) ----
     best_single = max(names, key=lambda s: np.nanmean(per_class[s]))
     print(f"\n⏳ Bootstrap {n_bootstraps} lần (paired) cho {len(systems)} hệ thống... (model đơn tốt nhất: {best_single})")
+    from tqdm import tqdm
     rng = np.random.RandomState(42)
     boot = {s: [] for s in systems}
-    for _ in range(n_bootstraps):
+    for _ in tqdm(range(n_bootstraps), desc='Bootstrap', ncols=100):
         idx = rng.randint(0, n, n)
         yb = labels[idx]
-        valid = [c for c in range(C) if 0 < yb[:, c].sum() < len(idx)]
         for s, p in systems.items():
-            boot[s].append(np.mean([roc_auc_score(yb[:, c], p[idx, c]) for c in valid]))
+            boot[s].append(np.nanmean(_fast_auroc_matrix(yb, p[idx])))
     ref = np.array(boot[best_single])
     for r in rows:
         b = np.array(boot[r['System']])
