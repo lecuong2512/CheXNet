@@ -5,6 +5,8 @@ import { useGetSimilarCasesQuery } from '../../stores/baseApi';
 import type { HybridAnalysis, InferenceMeta } from '../../types/hybrid';
 import { diseaseLabel, formatNumber, formatPercent } from '../../utils/display';
 import XrayViewer from './XrayViewer';
+import ClassificationDetails from './ClassificationDetails';
+import InferenceDetails from './InferenceDetails';
 
 export default function HybridAnalysisPanel({ analysis, inferenceMeta, originalImage, diagnosisId }: {
   analysis?: HybridAnalysis; inferenceMeta?: InferenceMeta; originalImage?: string; diagnosisId?: string;
@@ -23,20 +25,21 @@ export default function HybridAnalysisPanel({ analysis, inferenceMeta, originalI
         {selected && <label className="field-label">Dấu hiệu xem bản đồ chú ý
           <Select aria-label="Chọn dấu hiệu xem bản đồ chú ý" className="w-full" value={selected.disease} onChange={setSelectedDisease}
             options={analysis.predictions.map(p => ({ value: p.disease, label: `${diseaseLabel(p.disease)} · ${formatPercent(p.probability)}` }))} /></label>}
-        <XrayViewer originalImage={originalImage} attentionImage={selected?.heatmap} disease={selected && diseaseLabel(selected.disease)} />
+        <XrayViewer originalImage={originalImage} attentionImage={selected?.heatmap} disease={selected && diseaseLabel(selected.disease)}
+          detections={analysis.yolo_detections} detectorStatus={inferenceMeta?.detectorStatus} />
         {selected && <div className="rounded-lg bg-slate-50 dark:bg-slate-800 p-3 text-sm leading-relaxed">
-          <strong>Vị trí mô hình ghi nhận: </strong>{selected.lesion_location}
+          <strong>Vị trí ước tính từ bản đồ chú ý: </strong>{selected.lesion_location}
         </div>}
         <details className="disclosure technical-details"><summary>Thông số phân tích mở rộng</summary>
           <div className="space-y-3 mt-3 text-sm">
             {selected ? <dl className="metric-list">
               <div><dt>Dấu hiệu</dt><dd>{diseaseLabel(selected.disease)}</dd></div>
               <div><dt>Diện tích vùng chú ý</dt><dd>{formatNumber(selected.lesion_area_percent, 2)}%</dd></div>
-              <div><dt>Số vùng định vị</dt><dd>{selected.bounding_boxes.length}</dd></div>
+              <div><dt>Số vùng từ bản đồ chú ý</dt><dd>{selected.bounding_boxes.length}</dd></div>
               {selected.calibrated_confidence != null && <div><dt>Điểm mô hình cung cấp</dt><dd>{formatPercent(selected.calibrated_confidence)}</dd></div>}
               {selected.uncertainty != null && <div><dt>Độ bất định mô hình cung cấp</dt><dd>{formatNumber(selected.uncertainty, 4)}</dd></div>}
             </dl> : <p>Không có nhãn bệnh vượt ngưỡng hiển thị.</p>}
-            {report.findings.filter(f => f.disease === selected?.disease).map(f => <p key={f.disease}>{f.disease_vi || diseaseLabel(f.disease)}{f.severity_vi ? ` · Mức độ ${f.severity_vi.toLowerCase()}` : ''}</p>)}
+            {report.findings.filter(f => f.disease === selected?.disease).map(f => <p key={f.disease}>{diseaseLabel(f.disease)}{f.severity_vi ? ` · Mức độ ${f.severity_vi.toLowerCase()}` : ''}</p>)}
             <h3 className="font-semibold">Bộ định vị bổ sung (YOLO)</h3>
             {analysis.yolo_detections.length ? analysis.yolo_detections.map((d, i) => <div key={i}>
               <p>{diseaseLabel(d.disease)} · Điểm định vị {formatPercent(d.confidence)} · Điểm kết hợp {formatPercent(d.cascade_score)}</p>
@@ -49,14 +52,20 @@ export default function HybridAnalysisPanel({ analysis, inferenceMeta, originalI
       </div> },
       { key: 'probabilities', label: 'Điểm AI', children: <div className="space-y-4">
         <p className="text-sm text-secondary dark:text-gray-400">Đầy đủ 15 nhãn của mô hình. Mỗi điểm thể hiện mức dự đoán cho một nhãn; các điểm không cộng thành 100%.</p>
+        <ClassificationDetails classification={inferenceMeta?.classification} />
         <div className="grid gap-4 sm:grid-cols-2">{analysis.all_probabilities.map(p => <div key={p.disease}>
           <div className="flex justify-between gap-3 text-sm"><span>{diseaseLabel(p.disease)}</span><strong>{formatPercent(p.probability)}</strong></div>
           <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded mt-2 overflow-hidden" role="meter" aria-label={diseaseLabel(p.disease)} aria-valuemin={0} aria-valuemax={100} aria-valuenow={p.probability * 100}>
             <div className="h-full bg-blue-600 rounded" style={{ width: `${p.probability * 100}%` }} /></div>
+          {inferenceMeta?.classification?.decisions.filter(item => item.disease === p.disease).map(item =>
+            <p key={item.disease} className="text-xs text-secondary mt-1">Ngưỡng {formatPercent(item.threshold)} · {item.aboveThreshold ? 'Vượt ngưỡng' : 'Dưới ngưỡng'}</p>)}
         </div>)}</div>
       </div> },
       { key: 'report', label: 'Báo cáo', children: <div className="space-y-4 text-sm leading-relaxed">
-        <h3 className="section-title">Tóm tắt do AI đề xuất</h3><p>{report.summary}</p>
+        <InferenceDetails meta={inferenceMeta} />
+        <ClassificationDetails classification={inferenceMeta?.classification} showFindings />
+        {Boolean(inferenceMeta?.classification?.withoutHeatmap.length) && <p className="text-xs text-secondary">Mô tả dưới đây thuộc các nhãn có bản đồ chú ý, không thay thế danh sách đầy đủ phía trên.</p>}
+        <h3 className="section-title">{inferenceMeta?.classification ? 'Mô tả từ các bản đồ chú ý' : 'Tóm tắt do AI đề xuất'}</h3><p>{report.summary}</p>
         {report.findings.map(f => <p key={f.disease}>{f.finding_text}</p>)}
         {report.recommendations.length > 0 && <><h3 className="font-semibold">Khuyến nghị do AI đề xuất</h3>
           <ul className="list-disc pl-5 space-y-2">{report.recommendations.map((r, i) => <li key={i}>{r}</li>)}</ul></>}

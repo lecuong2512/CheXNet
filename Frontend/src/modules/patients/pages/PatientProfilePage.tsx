@@ -628,9 +628,9 @@ const PatientProfilePage: React.FC = () => {
                                             </div>
                                             <p className="text-xs text-on-surface-variant dark:text-gray-400 mb-2 truncate" title={scanTypeLabel(scan.type)}>{scanTypeLabel(scan.type)}</p>
                                             <div className="flex items-center gap-2">
-                                                <span className={`w-2 h-2 rounded-full ${hasAnomaly ? 'bg-tertiary' : 'bg-emerald-500'}`}></span>
+                                                <span className={`w-2 h-2 rounded-full ${hasAnomaly ? 'bg-tertiary' : 'bg-slate-400'}`}></span>
                                                 <span className="text-[11px] font-medium text-on-surface dark:text-gray-200">
-                                                    {hasAnomaly ? `Phát hiện: ${scan.predictions[0].name}` : 'Ổn định / Bình thường'}
+                                                    {hasAnomaly ? `Nhãn vượt ngưỡng: ${scan.predictions[0].name}` : 'Không có nhãn vượt ngưỡng'}
                                                 </span>
                                             </div>
                                         </div>

@@ -1,5 +1,6 @@
 """Render a stored diagnosis to PDF without loading the inference model."""
 import io
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,29 @@ def render_report(data: dict) -> bytes:
     paragraph(f"Trạng thái {data.get('statusLabel', '')} · Phiên bản {data.get('revision', 0)}")
     paragraph("Kỹ thuật và dữ liệu phân tích", heading)
     paragraph(f"{data.get('scanType', 'Chưa ghi nhận tư thế')} · {data.get('model', 'Chưa ghi nhận model')}")
+    trace = data.get('inferenceTrace')
+    if trace:
+        paragraph(f"Mã đối chiếu xử lý: {trace['id']}")
+        completed = datetime.fromisoformat(trace['completedAt']).astimezone(timezone(timedelta(hours=7)))
+        paragraph(f"Hoàn tất lúc {completed.strftime('%d/%m/%Y %H:%M:%S')} (giờ Việt Nam)")
+        for key, label in [('hybrid', 'Hybrid CNN–ViT'), ('yolo', 'YOLO')]:
+            stage = trace['models'][key]
+            paragraph(f"{label}: " + (f"Đã ghi nhận thực thi · {stage['forwardCalls']} lượt" if stage['observed'] else "Chưa ghi nhận thực thi"))
+    classification = data.get("classification")
+    if classification:
+        paragraph("Danh sách nhãn vượt ngưỡng", heading)
+        paragraph(classification["summary"])
+        paragraph("Tên nhãn là nhóm phân loại; kích thước ghi trong tên nhãn không phải số đo từ ảnh.")
+        for finding in classification["findings"]:
+            score = f"{finding['probability'] * 100:.1f}".replace(".", ",")
+            threshold = f"{finding['threshold'] * 100:.1f}".replace(".", ",")
+            paragraph(f"{finding['label']}: {score}% · Ngưỡng {threshold}%")
+        for warning in classification["warnings"]:
+            paragraph(warning)
+        if classification["withoutHeatmap"]:
+            paragraph("Mô tả dưới đây chỉ thuộc các nhãn có bản đồ chú ý, không thay thế danh sách đầy đủ phía trên.")
+    else:
+        paragraph("Phiếu cũ chưa lưu ngưỡng phân loại. Danh sách mô tả có thể chưa bao gồm mọi nhãn vượt ngưỡng.")
     paragraph("Mô tả do AI đề xuất", heading)
     findings = report.get("findings") or []
     if findings:
@@ -53,7 +77,7 @@ def render_report(data: dict) -> bytes:
     else:
         paragraph(report.get("summary") or "Chưa có bản mô tả AI")
     paragraph("Kết luận AI", heading)
-    paragraph(report.get("summary") or "Chưa có kết luận AI")
+    paragraph((classification or {}).get("summary") or report.get("summary") or "Chưa có kết luận AI")
     paragraph("Khuyến nghị do AI đề xuất", heading)
     for recommendation in report.get("recommendations") or []:
         paragraph("- " + str(recommendation))

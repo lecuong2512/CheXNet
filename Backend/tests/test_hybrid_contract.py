@@ -55,7 +55,7 @@ class HybridContractTests(unittest.IsolatedAsyncioTestCase):
         expected = {p["disease"]: p["probability"] for p in self.analysis["all_probabilities"]}
         self.assertEqual({p["className"]: p["probability"] for p in result["predictions"]}, expected)
         self.assertIsNone(result["isValidXRay"])
-        self.assertEqual(result["inferenceMeta"]["contractVersion"], 1)
+        self.assertEqual(result["inferenceMeta"]["contractVersion"], 2)
         self.assertEqual(result["inferenceMeta"]["detectorStatus"], "detections")
 
     async def test_empty_detector_results_do_not_claim_successful_detection(self):

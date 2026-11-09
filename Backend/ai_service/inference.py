@@ -10,6 +10,8 @@ import time
 
 from fastapi import HTTPException, UploadFile
 from Backend.ai_service.image_input import decode_upload
+from Backend.ai_service.classification import classification_summary
+from Backend.ai_service.inference_trace import ModelCallTrace
 from Backend import main as hybrid
 from Backend.ai_service.xray_validator import get_validator_status, validate_chest_xray_image
 
@@ -18,6 +20,14 @@ MODEL_VERSION = "hybrid-convnextv2-swinv2"
 
 class CheXNetInference:
     async def predict(self, file: UploadFile) -> dict:
+        detector = getattr(hybrid, "yolo_detector", None)
+        yolo_module = getattr(getattr(detector, "model", None), "model", None)
+        with ModelCallTrace(hybrid.model, yolo_module) as trace:
+            result = await self._predict(file)
+        result["inferenceMeta"]["trace"] = trace.result
+        return result
+
+    async def _predict(self, file: UploadFile) -> dict:
         if hybrid.model is None:
             raise HTTPException(503, "Hybrid model is not loaded")
         started = time.perf_counter()
@@ -48,6 +58,13 @@ class CheXNetInference:
             raise HTTPException(500, "Hybrid inference returned incomplete probabilities")
         if any(not math.isfinite(p["probability"]) or not 0 <= p["probability"] <= 1 for p in probabilities):
             raise HTTPException(500, "Hybrid inference returned invalid probabilities")
+        try:
+            classification = classification_summary(
+                probabilities, hybrid.CLASS_NAMES, getattr(hybrid, "optimal_thresholds", None),
+                [item["disease"] for item in analysis.get("predictions", [])],
+            )
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            raise HTTPException(500, "Hybrid classifier thresholds do not match its labels") from exc
         return {
             "success": True,
             "predictions": [{"className": p["disease"], "probability": p["probability"]} for p in probabilities],
@@ -58,7 +75,8 @@ class CheXNetInference:
             "hybridAnalysis": analysis,
             "previewPng": base64.b64encode(preview).decode("ascii") if preview is not None else None,
             "inferenceMeta": {
-                "contractVersion": 1,
+                "contractVersion": 2,
+                "classification": classification,
                 "device": str(getattr(hybrid, "device", "unknown")),
                 "detectorStatus": (
                     "detections" if analysis.get("yolo_detections") else

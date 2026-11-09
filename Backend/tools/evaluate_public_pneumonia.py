@@ -217,6 +217,8 @@ def infer(output):
                         'native_findings': [p['disease'] for p in findings],
                         'clinical_summary': analysis.get('clinical_report', {}).get('summary'),
                         'native_findings_detail': [{k: v for k, v in p.items() if k != 'heatmap'} for p in findings],
+                        'yolo_detections': analysis.get('yolo_detections', []),
+                        'complete_findings': [p['disease'] for p in body.get('inferenceMeta', {}).get('classification', {}).get('findings', [])],
                         'model_version': body.get('modelVersion'),
                         'inference_meta': body.get('inferenceMeta')})
         except Exception as exc:
@@ -289,6 +291,7 @@ def report(output):
                    'train_val_filename_overlap':manifest['training_filename_overlap']},
         'primary_classifier_pneumonia_threshold_0_5':primary,
         'web_native_pneumonia_on_accepted_images':displayed,
+        'web_complete_pneumonia_on_accepted_images': classification(accepted, lambda r:'Pneumonia' in r.get('complete_findings', [])) if all('complete_findings' in r for r in accepted) else None,
         'secondary_no_finding_rule_for_abnormality':no_finding_rule,
         'secondary_any_native_finding_for_abnormality':native_abnormal,
         'normal_images': {'n':len(normals),

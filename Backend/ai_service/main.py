@@ -19,6 +19,7 @@ from Backend.ai_service.xray_validator import preload_validator, get_validator_s
 from Backend.ai_service.runtime import InferenceRunner
 from Backend.ai_service.reference_store import ReferenceStore
 from Backend.ai_service.image_input import decode_upload
+from Backend.ai_service.inference_trace import configure_audit_log
 
 app = hybrid.app
 classifier = CheXNetInference()
@@ -30,6 +31,7 @@ reference_error = None
 @app.on_event("startup")
 def initialize_web_validation():
     global reference_store, reference_error
+    configure_audit_log(ROOT / '.runtime/inference-audit.log')
     preload_validator()
     try:
         reference_store = ReferenceStore(hybrid.cbir_finder,

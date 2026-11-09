@@ -82,67 +82,15 @@ const formatDateVi = (isoStr: string): { date: string; time: string } => {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// HELPER: Map raw AI predictions → Frontend display format
-// ══════════════════════════════════════════════════════════════════════════════
-/** Ngưỡng lâm sàng: chỉ hiển thị nhãn bệnh khi model đủ tin cậy (≥ 35%) */
-const CLINICAL_PROB_THRESHOLD = 0.35;
-
-const mapPredictions = (rawPreds: any[]): any[] => {
-    if (!rawPreds || rawPreds.length === 0) return [];
-    return rawPreds
-        .filter((p) => p.className !== 'No Finding' && p.probability >= CLINICAL_PROB_THRESHOLD)
-        .map((p) => ({
-            name: classNameViMap[p.className] || p.className,
-            probability: Math.round(p.probability * 100),
-            status: p.probability > 0.5 ? 'warning' : 'normal',
-        }))
-        .sort((a, b) => b.probability - a.probability);
-};
-
-// ══════════════════════════════════════════════════════════════════════════════
-// HELPER: Auto-generate AI clinical description from predictions
-// ══════════════════════════════════════════════════════════════════════════════
-const generateAiDescription = (rawPreds: any[]): string => {
-    if (!rawPreds || rawPreds.length === 0) {
-        return 'Mô hình AI không phát hiện các dấu hiệu bệnh lý rõ ràng trên phim phổi. Bệnh nhân nên tiếp tục lịch theo dõi lâm sàng định kỳ.';
-    }
-    const sig = rawPreds.filter(
-        (p) => p.className !== 'No Finding' && p.probability >= CLINICAL_PROB_THRESHOLD,
-    );
-    if (sig.length === 0) {
-        return 'Hình ảnh X-quang phổi ổn định. Không phát hiện bất thường rõ rệt so với phim cơ bản. Đề xuất theo dõi định kỳ.';
-    }
-    const top = sig[0];
-    const name = classNameViMap[top.className] || top.className;
-    const pct = Math.round(top.probability * 100);
-    return (
-        `Mô hình AI đã phát hiện dấu hiệu ${name} với độ tin cậy ${pct}%. ` +
-        'Khuyến nghị bác sĩ xem xét đối chiếu với triệu chứng lâm sàng và kết quả xét nghiệm để xác nhận chẩn đoán.'
-    );
-};
-
-const generateNextSteps = (rawPreds: any[]): string[] => {
-    const sig = (rawPreds || []).filter(
-        (p) => p.className !== 'No Finding' && p.probability >= CLINICAL_PROB_THRESHOLD,
-    );
-    if (sig.length === 0) return ['Theo dõi định kỳ 6 tháng.'];
-    return [
-        'Tương quan với xét nghiệm chức năng hô hấp (PFT) lâm sàng.',
-        'Đánh giá tiền sử bệnh và các yếu tố nguy cơ của bệnh nhân.',
-        'Cân nhắc tái chụp X-quang ngực sau điều trị hoặc chuyển tuyến khi cần chụp CT (ngoài phạm vi hệ thống).',
-    ];
-};
-
-// ══════════════════════════════════════════════════════════════════════════════
 // HELPER: Merge a scan document with its matching diagnosis
 // ══════════════════════════════════════════════════════════════════════════════
 const uploadRequestKeys = new WeakMap<File, Map<string, string>>();
 
 const mapScanWithDiagnosis = (scan: any, diagnosis: any): any => {
     const { date, time } = formatDateVi(scan.createdAt);
-    const rawPreds = diagnosis?.predictions || [];
     const hybridAnalysis = diagnosis?.hybridAnalysis;
-    const detectedPredictions = hybridAnalysis?.predictions?.map((p: any) => ({
+    const classification = diagnosis?.inferenceMeta?.classification;
+    const detectedPredictions = (classification?.findings ?? hybridAnalysis?.predictions)?.map((p: any) => ({
         name: classNameViMap[p.disease] || p.disease,
         probability: Math.round(p.probability * 100),
         status: 'warning',
@@ -157,9 +105,9 @@ const mapScanWithDiagnosis = (scan: any, diagnosis: any): any => {
         type: scan.type || 'X-Quang ngực PA',
         status: diagStatusToVi[diagStatus] || diagStatus,
         image: scan.imageUrl ? `${BACKEND_ORIGIN}${scan.imageUrl}` : undefined,
-        predictions: detectedPredictions ?? mapPredictions(rawPreds),
-        description: hybridAnalysis?.clinical_report?.summary || generateAiDescription(rawPreds),
-        nextSteps: hybridAnalysis?.clinical_report?.recommendations || generateNextSteps(rawPreds),
+        predictions: detectedPredictions ?? [],
+        description: classification?.summary || hybridAnalysis?.clinical_report?.summary || 'Hồ sơ chưa có kết luận từ pipeline Hybrid. Cần phân tích lại ảnh để lấy kết quả đầy đủ.',
+        nextSteps: hybridAnalysis?.clinical_report?.recommendations || [],
         hybridAnalysis,
         aiModel: diagnosis?.aiModel,
         processingTime: diagnosis?.processingTime,
@@ -299,7 +247,12 @@ export const baseApi = createApi({
                 if (arg?.type && arg.type !== 'Tất cả Kết quả') {
                     if (arg.type === 'Bình thường') {
                         flatScans = flatScans.filter(
-                            (s) => s.predictions.length === 0,
+                            (s) => {
+                                const assessment = s.inferenceMeta?.classification;
+                                return assessment?.findings.length === 0 && assessment.decisions.some(
+                                    (decision: any) => decision.disease === 'No Finding' && decision.aboveThreshold,
+                                );
+                            },
                         );
                     } else {
                         const typeMap: Record<string, string> = {

@@ -23,6 +23,8 @@ export async function renderDiagnosisPdf(id: string, revision?: string) {
         scanType: diagnosis.scan.type,
         model: diagnosis.aiModel,
         report: diagnosis.hybridAnalysis?.clinical_report,
+        classification: diagnosis.inferenceMeta?.classification,
+        inferenceTrace: diagnosis.inferenceMeta?.trace,
         notes: diagnosis.notes,
         statusLabel: diagnosis.status === 'verified' ? 'Đã xác minh' : diagnosis.status === 'flagged' ? 'Cần xem lại' : 'Chưa xác minh',
         verifiedByName: diagnosis.verifiedByName,

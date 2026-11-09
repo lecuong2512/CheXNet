@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Alert, Button, Empty, Progress, Select, Spin } from 'antd';
 import DiagnosisReport from '../../../components/common/DiagnosisReport';
 import AiStatus from '../../../components/common/AiStatus';
+import ClassificationDetails from '../../../components/common/ClassificationDetails';
 import HybridAnalysisPanel from '../../../components/common/HybridAnalysisPanel';
 import { useGetPatientsQuery, useGetPatientProfileQuery, useGetScanDetailQuery } from '../../../stores/baseApi';
 import { formatNumber, scanTypeLabel, scanChoiceLabel, diagnosisStatusLabel } from '../../../utils/display';
@@ -55,6 +56,7 @@ export default function DashboardPage() {
             <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="section-title">Kết quả AI</h2><span className="status-pill">{diagnosisStatusLabel(activeScan.status)}</span></div>
             <p className="text-sm leading-relaxed text-secondary dark:text-gray-300">{activeScan.description}</p>
             <p className="text-xs text-secondary dark:text-gray-400">Điểm dự đoán cho từng dấu hiệu; không phải độ chính xác của chẩn đoán.</p>
+            <ClassificationDetails classification={activeScan.inferenceMeta?.classification} />
             <div className="space-y-3">{activeScan.predictions?.length ? activeScan.predictions.map((prediction: { name: string; probability: number }) =>
               <div key={prediction.name}><div className="flex justify-between gap-3 text-sm"><span>{prediction.name}</span><strong className="whitespace-nowrap">{formatNumber(prediction.probability, 0)}%</strong></div>
                 <Progress percent={prediction.probability} showInfo={false} strokeColor="#2563eb" /></div>) : <p className="text-sm">Không có nhãn bệnh vượt ngưỡng hiển thị.</p>}</div>

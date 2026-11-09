@@ -8,6 +8,8 @@ import { formatAiModelLabel } from '../../utils/aiModel';
 import { useVerifyScanMutation } from '../../stores/baseApi';
 import type { HybridAnalysis, InferenceMeta } from '../../types/hybrid';
 import ReferenceCaseActions from './ReferenceCaseActions';
+import ClassificationDetails from './ClassificationDetails';
+import InferenceDetails from './InferenceDetails';
 
 interface ReportScan {
     id: string;
@@ -104,11 +106,13 @@ export default function DiagnosisReport({ open, onClose, scan, patient }: {
             <p>Trạng thái: {diagnosisStatusLabel(scan.status)} · Phiên bản {scan.revision ?? 0}</p>
             <h2 className="font-bold">Kỹ thuật và dữ liệu phân tích</h2>
             <p>{scanTypeLabel(scan.type)} · {formatAiModelLabel(scan.aiModel)} · {deviceLabel(scan.inferenceMeta?.device)}</p>
+            <InferenceDetails meta={scan.inferenceMeta} />
+            <ClassificationDetails classification={scan.inferenceMeta?.classification} showFindings />
             <h2 className="font-bold">Mô tả do AI đề xuất</h2>
             {report?.findings?.length ? report.findings.map((finding, index) =>
                 <p key={index}>{finding.finding_text}</p>) : <p>{report?.summary || scan.description || 'Chưa có bản mô tả AI'}</p>}
             <h2 className="font-bold">Kết luận AI</h2>
-            <p>{report?.summary || scan.description || 'Chưa có kết luận AI'}</p>
+            <p>{scan.inferenceMeta?.classification?.summary || report?.summary || scan.description || 'Chưa có kết luận AI'}</p>
             <h2 className="font-bold">Khuyến nghị do AI đề xuất</h2>
             <ul>{report?.recommendations?.map((recommendation, index) => <li key={index}>{recommendation}</li>)}</ul>
             {report?.warnings?.map((warning, index) => <p key={index}>{warning}</p>)}
