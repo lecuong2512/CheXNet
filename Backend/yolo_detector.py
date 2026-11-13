@@ -21,6 +21,38 @@ except ImportError:
     print("[WARN] ultralytics not installed. YOLO detection disabled. Install: pip install ultralytics")
 
 
+def draw_dashed_rectangle(
+    image_np: np.ndarray,
+    pt1: Tuple[int, int],
+    pt2: Tuple[int, int],
+    color: Tuple[int, int, int],
+    thickness: int = 2,
+    dash_len: int = 10,
+) -> None:
+    """Vẽ hình chữ nhật viền đứt nét lên ảnh numpy (tại chỗ)."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    edges = [
+        ((x1, y1), (x2, y1)),
+        ((x2, y1), (x2, y2)),
+        ((x2, y2), (x1, y2)),
+        ((x1, y2), (x1, y1)),
+    ]
+    for start, end in edges:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = max(abs(dx), abs(dy))
+        if length == 0:
+            continue
+        n_dashes = max(1, length // (dash_len * 2))
+        for j in range(n_dashes):
+            t1 = j / n_dashes
+            t2 = min((j + 0.5) / n_dashes, 1.0)
+            sp = (int(start[0] + dx * t1), int(start[1] + dy * t1))
+            ep = (int(start[0] + dx * t2), int(start[1] + dy * t2))
+            cv2.line(image_np, sp, ep, color, thickness, lineType=cv2.LINE_AA)
+
+
 class YOLODetector:
     """
     Wrapper cho YOLO11m đã train trên VinDr-CXR.
@@ -262,18 +294,28 @@ class YOLODetector:
         for det in detections:
             bbox = det['bbox']
             x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
-            
-            display_name = det.get('display_name', det.get('chexnet_class_name') or det['vindr_class_name'])
-            score = det.get('cascade_score', det['confidence'])
-            label = f"{display_name}: {score:.0%}"
-            
-            # Vẽ box
-            cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness, lineType=cv2.LINE_AA)
-            
-            # Vẽ label background
+            is_hybrid = str(det.get('source', '')).startswith('hybrid')
+            box_color = (255, 165, 0) if is_hybrid else color
+
+            display_name = det.get(
+                'display_name',
+                det.get('chexnet_class_name') or det.get('vindr_class_name') or det.get('disease', ''),
+            )
+            score = det.get('cascade_score', det.get('probability', det.get('confidence', 0)))
+            label = f"{display_name} (Hybrid): {score:.0%}" if is_hybrid else f"{display_name}: {score:.0%}"
+
+            # Vẽ box (YOLO liền nét, Hybrid đứt nét)
+            if is_hybrid:
+                draw_dashed_rectangle(vis, (x1, y1), (x2, y2), box_color, thickness=thickness)
+            else:
+                cv2.rectangle(vis, (x1, y1), (x2, y2), box_color, thickness, lineType=cv2.LINE_AA)
+
+            # Vẽ label background (tránh tràn lên mép trên ảnh)
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(vis, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(vis, label, (x1 + 2, y1 - 4),
+            text_top = max(0, y1 - th - 8)
+            text_bottom = text_top + th + 8
+            cv2.rectangle(vis, (x1, text_top), (x1 + tw + 4, text_bottom), box_color, -1)
+            cv2.putText(vis, label, (x1 + 2, text_bottom - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
         
         return vis

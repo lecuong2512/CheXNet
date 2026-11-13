@@ -27,10 +27,13 @@ for p in [backend_dir, models_dir, project_root]:
 from Model import HybridCNNViTModel
 from checkpoint_utils import load_checkpoint_safe, extract_state_dict
 from post_processing import cam_to_bboxes, compute_attention_quality, check_co_occurrence, get_clinical_thresholds
-from lung_segmentation import get_lung_mask, apply_lung_mask, compute_lesion_area_ratio, get_lesion_location
+from lung_segmentation import (
+    get_lung_mask, apply_lung_mask, compute_lesion_area_ratio,
+    get_lesion_location, NON_LUNG_DISEASES,
+)
 from report_generator import ClinicalReportGenerator
 from cbir import SimilarCaseFinder
-from yolo_detector import YOLODetector
+from yolo_detector import YOLODetector, draw_dashed_rectangle
 import torch.nn.functional as F
 
 app = FastAPI(title="CheXNet Local Inference API")
@@ -149,6 +152,8 @@ def load_model():
         model.eval()
         if hasattr(model, 'set_grad_checkpointing'):
             model.set_grad_checkpointing(False)
+        for param in model.parameters():
+            param.requires_grad_(False)
         
         # FIX: Pipeline tien xu ly THONG NHAT voi predict_single.py va TrainModel.py.
         # Truoc day: ToTensor() -> Resize/Crop tren TENSOR (dung bilinear interpolation
@@ -215,6 +220,134 @@ def health_check():
         "model_info": current_model_info,
     }
 
+# Nhóm bệnh chưa có ground-truth BBox trong VinDr-CXR -> attention_head yếu, ưu tiên Grad-CAM khi bổ sung khung
+GRADCAM_PREFERRED_DISEASES = {'Pneumonia', 'Edema', 'Emphysema', 'Hernia'}
+
+
+def _project_crop_bbox_to_original(bbox, orig_size, resized_size, crop_size):
+    """Quy đổi bbox trong ảnh CenterCrop(crop_size) về hệ tọa độ ảnh gốc (orig_w, orig_h)."""
+    orig_w, orig_h = orig_size
+    resized_w, resized_h = resized_size
+    if orig_w <= 0 or orig_h <= 0 or resized_w <= 0 or resized_h <= 0:
+        return None
+    crop_left = int(round((resized_w - crop_size) / 2.0))
+    crop_top = int(round((resized_h - crop_size) / 2.0))
+    ox1 = max(0, min(orig_w, int(round((bbox['x1'] + crop_left) * orig_w / resized_w))))
+    oy1 = max(0, min(orig_h, int(round((bbox['y1'] + crop_top) * orig_h / resized_h))))
+    ox2 = max(0, min(orig_w, int(round((bbox['x2'] + crop_left) * orig_w / resized_w))))
+    oy2 = max(0, min(orig_h, int(round((bbox['y2'] + crop_top) * orig_h / resized_h))))
+    if ox2 <= ox1 or oy2 <= oy1:
+        return None
+    return {'x1': ox1, 'y1': oy1, 'x2': ox2, 'y2': oy2}
+
+
+def _compute_fpn_gradcam_maps(model_obj, inp_tensor, class_indices):
+    """Tính bản đồ Grad-CAM trên fpn_merge cho danh sách class_indices trong 1 lượt forward."""
+    unique_indices = list(dict.fromkeys(int(i) for i in class_indices))
+    fpn_module = getattr(model_obj, 'fpn_merge', None)
+    if not unique_indices or fpn_module is None:
+        return {}
+
+    feats = {}
+
+    def _capture_fpn(_mod, _inp, out):
+        feats['fpn'] = out
+
+    handle = fpn_module.register_forward_hook(_capture_fpn)
+    gradcam_maps = {}
+    try:
+        with torch.enable_grad():
+            x_in = inp_tensor.detach().requires_grad_(True)
+            out = model_obj(x_in)
+            logits = out[0] if isinstance(out, tuple) else out
+            fpn = feats.get('fpn')
+            if fpn is None or not fpn.requires_grad:
+                return {}
+            for pos, cls_idx in enumerate(unique_indices):
+                grad = torch.autograd.grad(
+                    logits[0, cls_idx],
+                    fpn,
+                    retain_graph=(pos < len(unique_indices) - 1),
+                    allow_unused=True,
+                )[0]
+                if grad is None:
+                    continue
+                weights = grad.mean(dim=(2, 3), keepdim=True)
+                cam = F.relu((weights * fpn).sum(dim=1, keepdim=True))[0, 0].detach().cpu().numpy()
+                cmin, cmax = float(cam.min()), float(cam.max())
+                if cmax - cmin > 1e-8:
+                    cam = (cam - cmin) / (cmax - cmin + 1e-8)
+                else:
+                    cam = np.zeros_like(cam, dtype=np.float32)
+                gradcam_maps[cls_idx] = cam.astype(np.float32)
+    except Exception as exc:
+        print(f"[WARN] Grad-CAM localization fallback failed: {exc}", flush=True)
+    finally:
+        handle.remove()
+    return gradcam_maps
+
+
+def _select_hybrid_localization(disease_name, att_2d, att_filtered_2d, lung_mask, img_size, gradcam_2d=None):
+    """Chọn bản đồ vị trí và danh sách bbox tốt nhất từ mô hình Hybrid khi YOLO chưa vẽ khung."""
+    import cv2
+
+    if disease_name in GRADCAM_PREFERRED_DISEASES and gradcam_2d is not None and float(gradcam_2d.max()) > 1e-4:
+        gcam_vis = gradcam_2d
+        if disease_name not in NON_LUNG_DISEASES and lung_mask is not None and float(lung_mask.mean()) > 0.05:
+            mask_resized = cv2.resize(lung_mask, (gradcam_2d.shape[1], gradcam_2d.shape[0]), interpolation=cv2.INTER_NEAREST)
+            masked_gcam = gradcam_2d * mask_resized
+            if float(masked_gcam.max()) >= 0.25:
+                masked_boxes = cam_to_bboxes(masked_gcam, img_size, threshold_method='otsu')
+                if masked_boxes:
+                    return masked_gcam, masked_boxes, 'hybrid-gradcam'
+        gcam_boxes = cam_to_bboxes(gcam_vis, img_size, threshold_method='otsu')
+        if gcam_boxes:
+            return gcam_vis, gcam_boxes, 'hybrid-gradcam'
+
+    att_boxes = cam_to_bboxes(att_filtered_2d, img_size, threshold_method='otsu')
+    if att_boxes:
+        return att_filtered_2d, att_boxes, 'hybrid-attention'
+
+    if float(att_2d.max()) >= 0.15:
+        raw_boxes = cam_to_bboxes(att_2d, img_size, threshold_method='otsu')
+        if raw_boxes:
+            return att_2d, raw_boxes, 'hybrid-attention'
+
+    if gradcam_2d is not None and float(gradcam_2d.max()) > 1e-4:
+        gcam_boxes = cam_to_bboxes(gradcam_2d, img_size, threshold_method='otsu')
+        return gradcam_2d, gcam_boxes, 'hybrid-gradcam'
+
+    return att_filtered_2d, [], 'hybrid-attention'
+
+
+def _collect_hybrid_fallback_boxes(
+    disease_name, probability, bboxes, source, orig_size, resized_size, crop_size, max_boxes=2, min_conf=0.2
+):
+    """Chuyển đổi tối đa max_boxes khung Hybrid sang tọa độ ảnh gốc cho bệnh YOLO chưa vẽ."""
+    if not bboxes:
+        return []
+    orig_area = max(1, orig_size[0] * orig_size[1])
+    candidates = [b for b in bboxes if float(b.get('confidence', 0)) >= min_conf] or bboxes[:1]
+    collected = []
+    for bbox in candidates:
+        projected = _project_crop_bbox_to_original(bbox, orig_size, resized_size, crop_size)
+        if not projected:
+            continue
+        box_area = (projected['x2'] - projected['x1']) * (projected['y2'] - projected['y1'])
+        if box_area < 0.002 * orig_area:
+            continue
+        collected.append({
+            'disease': disease_name,
+            'confidence': float(bbox.get('confidence', 0.0)),
+            'probability': float(probability),
+            'source': source,
+            'bbox': projected,
+        })
+        if len(collected) >= max_boxes:
+            break
+    return collected
+
+
 @app.post("/predict")
 async def predict_image(file: UploadFile = File(...)):
     if model is None:
@@ -234,12 +367,11 @@ async def predict_image(file: UploadFile = File(...)):
         inputs = transform_inference(image).unsqueeze(0).to(device)
         
         # Anh goc numpy de overlay heatmap (sau khi crop giong pipeline)
-        img_size = 384
-        transform_vis = transforms.Compose([
-            transforms.Resize(int(img_size * 1.14)),
-            transforms.CenterCrop(img_size)
-        ])
-        original_vis = transform_vis(image)
+        img_size = current_model_info.get("img_size") or 384
+        orig_w, orig_h = image.size
+        resized_vis = transforms.Resize(int(img_size * 1.14))(image)
+        resized_size = resized_vis.size
+        original_vis = transforms.CenterCrop(img_size)(resized_vis)
         original_np = np.array(original_vis)
         
         # Chạy dự đoán chuẩn như predict_single.py (Không dùng Data Augmentation lúc test)
@@ -291,34 +423,96 @@ async def predict_image(file: UploadFile = File(...)):
         pathology_results = [r for r in all_results if r["disease"] != 'No Finding']
         
         # Sử dụng optimal_thresholds giống hệt predict_single.py (thay vì CLINICAL_THRESHOLDS)
-        top_targets = []
+        positive_targets = []
         for r in pathology_results:
             d_idx = r["idx"]
             thr = optimal_thresholds[d_idx] if 'optimal_thresholds' in globals() and optimal_thresholds is not None else 0.5
             if r["probability"] >= thr:
-                top_targets.append(r)
-        
-        # Giới hạn số bệnh hiển thị heatmap giống predict_single.py (hiển thị tối đa 6 bệnh có xác suất cao nhất)
-        top_targets = top_targets[:6]
+                positive_targets.append(r)
+
+        # Giới hạn số bệnh vẽ JPEG heatmap ở 6 như trước, nhưng vẫn trích khung Hybrid
+        # cho MỌI bệnh vượt ngưỡng mà YOLO chưa vẽ.
+        top_targets = positive_targets[:6]
+
+        yolo_by_disease = {}
+        if yolo_detections_filtered and yolo_detector:
+            for det in yolo_detections_filtered:
+                key = det.get('display_name')
+                if key:
+                    yolo_by_disease.setdefault(key, []).append(det)
+
+        # Với mọi bệnh vượt ngưỡng chưa có YOLO box (kể cả bệnh xếp sau top-6 như Pneumonia),
+        # chỉ chạy thêm 1 lượt Grad-CAM nếu thực sự cần thiết.
+        gradcam_needed_indices = []
+        for item in positive_targets:
+            disease_name = item["disease"]
+            d_idx = item["idx"]
+            if yolo_by_disease.get(disease_name):
+                continue
+            if disease_name in GRADCAM_PREFERRED_DISEASES:
+                gradcam_needed_indices.append(d_idx)
+                continue
+            has_att_box = bool(cam_to_bboxes(att_maps_filtered[d_idx], img_size, threshold_method='otsu'))
+            if not has_att_box and float(att_maps[d_idx].max()) >= 0.15:
+                has_att_box = bool(cam_to_bboxes(att_maps[d_idx], img_size, threshold_method='otsu'))
+            if not has_att_box:
+                gradcam_needed_indices.append(d_idx)
+
+        gradcam_maps = _compute_fpn_gradcam_maps(model, inputs, gradcam_needed_indices) if gradcam_needed_indices else {}
+        if torch.cuda.is_available() and gradcam_needed_indices:
+            torch.cuda.empty_cache()
+
+        hybrid_boxes = []
+        hybrid_loc_by_idx = {}
+        for item in positive_targets:
+            disease_name = item["disease"]
+            d_idx = item["idx"]
+            if yolo_by_disease.get(disease_name):
+                continue
+            vis_map_2d, bboxes, loc_source = _select_hybrid_localization(
+                disease_name, att_maps[d_idx], att_maps_filtered[d_idx],
+                lung_mask, img_size, gradcam_maps.get(d_idx),
+            )
+            hybrid_loc_by_idx[d_idx] = (vis_map_2d, bboxes, loc_source)
+            hybrid_boxes.extend(
+                _collect_hybrid_fallback_boxes(
+                    disease_name, float(item["probability"]), bboxes, loc_source,
+                    (orig_w, orig_h), resized_size, img_size,
+                )
+            )
             
-        # Generate Heatmaps & Grad-CAM Hotspot Outlines cho các bệnh được chọn
+        # Generate Heatmaps & Hotspot/Fallback Boxes cho top-6 bệnh được chọn
         predictions = []
         for item in top_targets:
             d_idx = item["idx"]
+            disease_name = item["disease"]
             att_2d = att_maps[d_idx]
             att_filtered_2d = att_maps_filtered[d_idx]
+            matching_yolo = []
+            if yolo_by_disease.get(disease_name) and yolo_detector:
+                matching_yolo = yolo_detector.scale_detections(
+                    yolo_by_disease[disease_name], (orig_w, orig_h), (img_size, img_size)
+                )
             
             # Tính toán các metric phân tích mới
             quality = compute_attention_quality(att_2d)
             # YÊU CẦU: KHÔNG TÁC ĐỘNG VÀO KẾT QUẢ DỰ ĐOÁN CỦA MODEL
             calibrated_conf = float(item["probability"])
-            area_pct = compute_lesion_area_ratio(att_filtered_2d, lung_mask, 0.3)
-            location = get_lesion_location(att_filtered_2d, lung_mask, img_size)
-            bboxes = cam_to_bboxes(att_filtered_2d, img_size, threshold_method='otsu')
             uncertainty = float(std_probs[d_idx])
+
+            if matching_yolo:
+                vis_map_2d = att_filtered_2d
+                bboxes = cam_to_bboxes(att_filtered_2d, img_size, threshold_method='otsu')
+                area_pct = compute_lesion_area_ratio(att_filtered_2d, lung_mask, 0.3)
+                location = get_lesion_location(att_filtered_2d, lung_mask, img_size)
+            else:
+                vis_map_2d, bboxes, _ = hybrid_loc_by_idx[d_idx]
+                effective_mask = lung_mask if (vis_map_2d is att_filtered_2d and disease_name not in NON_LUNG_DISEASES) else np.ones_like(lung_mask)
+                area_pct = compute_lesion_area_ratio(vis_map_2d, effective_mask, 0.3)
+                location = get_lesion_location(vis_map_2d, effective_mask, img_size)
             
-            # Resize heatmap lên kích thước ảnh gốc
-            att_resized = cv2.resize(att_filtered_2d, (img_size, img_size), interpolation=cv2.INTER_CUBIC)
+            # Resize heatmap lên kích thước ảnh crop hiển thị
+            att_resized = cv2.resize(vis_map_2d, (img_size, img_size), interpolation=cv2.INTER_CUBIC)
             
             # Normalize 0-255
             att_norm = np.uint8(255 * (att_resized - att_resized.min()) / (att_resized.max() - att_resized.min() + 1e-8))
@@ -331,21 +525,11 @@ async def predict_image(file: UploadFile = File(...)):
             # PHƯƠNG ÁN A: DISPLAY FUSION
             # Heatmap chỉ hiển thị BÊN TRONG YOLO bbox (nếu có).
             # Nếu không có YOLO detection → fallback heatmap toàn ảnh
-            # + viền đứt nét từ cam_to_bboxes (độ tin cậy thấp hơn).
+            # + viền đứt nét từ Hybrid (Attention / Grad-CAM).
             # ══════════════════════════════════════════════════════════
-            
-            # Tìm YOLO detection khớp bệnh này
-            matching_yolo = []
-            if yolo_detections_filtered and yolo_detector:
-                disease_name = item["disease"]
-                matching_yolo = [d for d in yolo_detections_filtered if d.get('display_name') == disease_name]
-                if matching_yolo:
-                    orig_w, orig_h = image.size
-                    matching_yolo = yolo_detector.scale_detections(matching_yolo, (orig_w, orig_h), (img_size, img_size))
             
             if matching_yolo:
                 # ── CÓ YOLO BBOX: Heatmap CHỈ trong bbox ──
-                # Bắt đầu từ ảnh gốc (không có heatmap)
                 contour_vis = original_np.copy()
                 
                 for det in matching_yolo:
@@ -369,39 +553,20 @@ async def predict_image(file: UploadFile = File(...)):
                     score = det.get('cascade_score', det.get('confidence', 0))
                     label_text = f"{label} {score:.0%}"
                     (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    cv2.rectangle(contour_vis, (bx1, by1 - th - 6), (bx1 + tw + 4, by1), (0, 255, 128), -1)
-                    cv2.putText(contour_vis, label_text, (bx1 + 2, by1 - 4),
+                    cv2.rectangle(contour_vis, (bx1, max(0, by1 - th - 6)), (bx1 + tw + 4, max(th + 6, by1)), (0, 255, 128), -1)
+                    cv2.putText(contour_vis, label_text, (bx1 + 2, max(th + 2, by1 - 4)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
             else:
-                # ── KHÔNG CÓ YOLO BBOX: Fallback heatmap toàn ảnh ──
-                # Overlay heatmap toàn bộ (như trước)
+                # ── KHÔNG CÓ YOLO BBOX: Fallback heatmap toàn ảnh + viền đứt nét Hybrid ──
                 contour_vis = np.uint8(heatmap * 0.4 + original_np * 0.6)
-                
-                # Vẽ cam_to_bboxes viền ĐỨT NÉT (để bác sĩ biết độ tin cậy thấp hơn)
-                if bboxes:
-                    for bbox in bboxes:
-                        x1b, y1b, x2b, y2b = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
-                        # Vẽ viền đứt nét bằng cách vẽ nhiều đoạn ngắn
-                        dash_len = 10
-                        for edge_pts in [
-                            [(x1b, y1b), (x2b, y1b)],  # top
-                            [(x2b, y1b), (x2b, y2b)],  # right
-                            [(x2b, y2b), (x1b, y2b)],  # bottom
-                            [(x1b, y2b), (x1b, y1b)],  # left
-                        ]:
-                            pt1, pt2 = edge_pts
-                            dx = pt2[0] - pt1[0]
-                            dy = pt2[1] - pt1[1]
-                            length = max(abs(dx), abs(dy))
-                            if length == 0:
-                                continue
-                            n_dashes = max(1, length // (dash_len * 2))
-                            for j in range(n_dashes):
-                                t1 = j / n_dashes
-                                t2 = min((j + 0.5) / n_dashes, 1.0)
-                                sp = (int(pt1[0] + dx * t1), int(pt1[1] + dy * t1))
-                                ep = (int(pt1[0] + dx * t2), int(pt1[1] + dy * t2))
-                                cv2.line(contour_vis, sp, ep, (255, 165, 0), 2, cv2.LINE_AA)
+                for bbox in bboxes:
+                    draw_dashed_rectangle(
+                        contour_vis,
+                        (bbox['x1'], bbox['y1']),
+                        (bbox['x2'], bbox['y2']),
+                        (255, 165, 0),
+                        thickness=2,
+                    )
             
             # Encode Overlay thành Base64
             _, buffer = cv2.imencode('.jpg', cv2.cvtColor(contour_vis, cv2.COLOR_RGB2BGR))
@@ -447,6 +612,7 @@ async def predict_image(file: UploadFile = File(...)):
             "predictions": predictions,
             "all_probabilities": all_results,
             "yolo_detections": yolo_response,
+            "hybrid_boxes": hybrid_boxes,
             "co_occurrences": co_occurrences,
             "clinical_report": clinical_report,
             "similar_cases": similar_cases

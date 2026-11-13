@@ -18,24 +18,59 @@ export default function HybridAnalysisPanel({ analysis, inferenceMeta, originalI
   const hasPathologyFindings = inferenceMeta?.classification
     ? inferenceMeta.classification.findings.length > 0
     : analysis.predictions.some(p => p.disease !== 'No Finding');
-  const selectablePredictions = hasPathologyFindings
+  const basePredictions = hasPathologyFindings
     ? analysis.predictions.filter(p => p.disease !== 'No Finding')
     : analysis.predictions;
+  const sortedPredictions = [...basePredictions].sort((a, b) => b.probability - a.probability);
+  const probByDisease = new Map(analysis.all_probabilities.map(p => [p.disease, p.probability]));
+  const extraDiseases = new Set<string>();
+  for (const item of inferenceMeta?.classification?.findings || []) {
+    if (item.disease !== 'No Finding') extraDiseases.add(item.disease);
+  }
+  for (const box of analysis.hybrid_boxes || []) {
+    if (box.disease !== 'No Finding') extraDiseases.add(box.disease);
+  }
+  const predictionDiseases = new Set(sortedPredictions.map(p => p.disease));
+  const extraPositiveOptions = [...extraDiseases]
+    .filter(disease => !predictionDiseases.has(disease))
+    .map(disease => {
+      const boxProb = (analysis.hybrid_boxes || []).find(b => b.disease === disease)?.probability;
+      const prob = probByDisease.get(disease) ?? boxProb ?? 0;
+      return { value: disease, probability: prob, label: `${diseaseLabel(disease)} · ${formatPercent(prob)}` };
+    })
+    .sort((a, b) => b.probability - a.probability);
+  const coveredYoloDiseases = new Set([...predictionDiseases, ...extraPositiveOptions.map(o => o.value)]);
+  const extraYoloScores = new Map<string, number>();
+  for (const det of analysis.yolo_detections || []) {
+    if (!det.disease || coveredYoloDiseases.has(det.disease)) continue;
+    const score = Math.max(det.cascade_score ?? 0, det.confidence ?? 0);
+    extraYoloScores.set(det.disease, Math.max(extraYoloScores.get(det.disease) ?? 0, score));
+  }
+  const extraYoloOptions = [...extraYoloScores.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([disease, score]) => ({ value: disease, label: `${diseaseLabel(disease)} · Điểm YOLO ${formatPercent(score)}` }));
+  const selectableOptions = [
+    ...sortedPredictions.map(p => ({ value: p.disease, label: `${diseaseLabel(p.disease)} · ${formatPercent(p.probability)}`, prediction: p })),
+    ...extraPositiveOptions.map(({ value, label }) => ({ value, label, prediction: undefined })),
+    ...extraYoloOptions.map(({ value, label }) => ({ value, label, prediction: undefined })),
+  ];
   const displayedProbabilities = hasPathologyFindings
     ? analysis.all_probabilities.filter(p => p.disease !== 'No Finding')
     : analysis.all_probabilities;
-  const selected = selectablePredictions.find(p => p.disease === selectedDisease) ?? selectablePredictions[0];
+  const selectedOption = selectableOptions.find(o => o.value === selectedDisease) ?? selectableOptions[0];
+  const selected = selectedOption?.prediction;
   const report = analysis.clinical_report;
   const similar = linkedCases || analysis.similar_cases;
   return <section className="ui-card analysis-panel">
     <h2 className="section-title mb-1">Ảnh và phân tích</h2>
     <Tabs className="analysis-tabs" tabBarGutter={20} items={[
       { key: 'attention', label: 'Ảnh X-quang', children: <div className="space-y-4">
-        {selected && <label className="field-label">Dấu hiệu xem bản đồ chú ý
-          <Select aria-label="Chọn dấu hiệu xem bản đồ chú ý" className="w-full" value={selected.disease} onChange={setSelectedDisease}
-            options={selectablePredictions.map(p => ({ value: p.disease, label: `${diseaseLabel(p.disease)} · ${formatPercent(p.probability)}` }))} /></label>}
-        <XrayViewer originalImage={originalImage} attentionImage={selected?.heatmap} disease={selected && diseaseLabel(selected.disease)}
-          detections={analysis.yolo_detections} detectorStatus={inferenceMeta?.detectorStatus} />
+        {selectedOption && <label className="field-label">Dấu hiệu xem khung & bản đồ chú ý
+          <Select aria-label="Chọn dấu hiệu xem khung và bản đồ chú ý" className="w-full" value={selectedOption.value} onChange={setSelectedDisease}
+            options={selectableOptions.map(({ value, label }) => ({ value, label }))} /></label>}
+        <XrayViewer originalImage={originalImage} attentionImage={selected?.heatmap}
+          disease={selectedOption && diseaseLabel(selectedOption.value)} selectedDisease={selectedOption?.value}
+          detections={analysis.yolo_detections} hybridBoxes={analysis.hybrid_boxes} detectorStatus={inferenceMeta?.detectorStatus} />
         {selected && <div className="rounded-lg bg-slate-50 dark:bg-slate-800 p-3 text-sm leading-relaxed">
           <strong>Vị trí ước tính từ bản đồ chú ý: </strong>{selected.lesion_location}
         </div>}
@@ -55,6 +90,13 @@ export default function HybridAnalysisPanel({ analysis, inferenceMeta, originalI
               {d.vindr_class && <p>Lớp dữ liệu VinDr: {diseaseLabel(d.vindr_class)}</p>}
               {d.bbox && <p>Tọa độ vùng: [{d.bbox.x1}, {d.bbox.y1}, {d.bbox.x2}, {d.bbox.y2}]</p>}
             </div>) : <p>{inferenceMeta?.detectorStatus === 'unavailable' ? 'Chưa nạp trọng số YOLO11m cho lần phân tích này.' : inferenceMeta?.detectorStatus === 'loaded-unconfirmed' ? 'Đã nạp YOLO11m và đã quét ảnh, nhưng không phát hiện vùng tổn thương khu trú vượt ngưỡng (YOLO hỗ trợ 14 lớp VinDr).' : 'Chưa ghi nhận trạng thái bộ định vị cho lần chụp này.'}</p>}
+            {(analysis.hybrid_boxes?.length ?? 0) > 0 && <>
+              <h3 className="font-semibold">Khung định vị từ Hybrid</h3>
+              {analysis.hybrid_boxes!.map((b, i) => <div key={i}>
+                <p>{diseaseLabel(b.disease)} · Xác suất {formatPercent(b.probability)} · Điểm vùng {formatPercent(b.confidence)}</p>
+                {b.bbox && <p>Tọa độ vùng: [{b.bbox.x1}, {b.bbox.y1}, {b.bbox.x2}, {b.bbox.y2}]</p>}
+              </div>)}
+            </>}
             <a href="/legacy.html" target="_blank" rel="noreferrer" className="text-primary underline">Mở công cụ nghiên cứu nâng cao ↗</a>
           </div>
         </details>
