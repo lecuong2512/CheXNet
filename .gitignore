@@ -4,15 +4,25 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Local Python environment
+.venv/
+.runtime/
+
 # Heavy model files / checkpoints
 *.pth
 *.pt
 *.ckpt
 Trainedmodel/*.pth
 
-# Excluded folders requested by user
-Frontend/
-Backend/
+# Local application data and secrets
+.env
+.env.*
+!.env.example
+logs/
+Backend/uploads/
+Backend/data/*.faiss
+Backend/data/*.json
+*.tsbuildinfo
 
 # Frontend dependencies and builds
 node_modules/
@@ -23,3 +33,5 @@ dist/
 .vscode/
 .idea/
 .DS_Store
+private-uploads/
+Backend/data/reference-generations/

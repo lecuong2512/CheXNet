@@ -1,0 +1,13 @@
+Metric / Component,Base,Large,Large / Base Ratio
+CNN Backbone (ConvNeXtV2),"87,690,752","196,416,768",2.24x
+ViT Backbone (SwinV2 Last Stage),"25,228,352","56,715,360",2.25x
+FPN Decoder (Lateral + Merge),"9,965,568","22,419,456",2.25x
+Attention Head (15-channel),"2,363,919","3,543,567",1.50x
+"Classifier, Projection & Gate","15,376","23,056",1.50x
+TOTAL PARAMETERS,"125,263,967","279,118,207",2.23x
+"Inference Latency (BS=1, ms/img)",35.99 ms,62.54 ms,1.74x
+"Throughput (BS=1, img/sec)",27.78 img/s,15.99 img/s,0.58x
+"Peak VRAM (BS=1, MB)",764.8 MB,1674.1 MB,2.19x
+"Inference Latency (BS=4, ms/img)",28.18 ms,48.62 ms,1.73x
+"Throughput (BS=4, img/sec)",35.48 img/s,20.57 img/s,0.58x
+"Peak VRAM (BS=4, MB)",829.4 MB,1775.4 MB,2.14x

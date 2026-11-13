@@ -1,31 +1,40 @@
 # TrainModel_finetune.py
 # ============================================================================
-# SOTA Fine-tune Trainer v2 — 3-Phase Strategy
+# SOTA Fine-tune Trainer v2.1 — Optimized 3-Phase Strategy
 #
-# Pha 1 (epoch 1-freeze_epochs): Freeze backbone, chỉ train head
-#   - Linear Warmup 2 epoch
-#   - Head LR: 2e-4, Label Smoothing 0.02
+# Pha 1 (epoch 1 → freeze_epochs): Freeze backbone, chỉ train head + gate
+#   - Linear Warmup (1–2 epoch)
+#   - Head LR: 2e-4, Label Smoothing 0.02, Multi-Sample Dropout (5 branches)
 #
-# Pha 2 (epoch freeze_epochs+1 → swa_start-1): Unfreeze toàn bộ
-#   - Backbone LR: 5e-6, Head LR: 5e-5
-#   - MixUp α=0.2, R-Drop consistency
-#   - CosineAnnealingLR
+# Pha 2 (epoch freeze_epochs+1 → swa_start-1): Unfreeze toàn bộ từ Best Checkpoint
+#   - Khôi phục best EMA state trước khi unfreeze (tránh unfreeze từ weights đã overfit)
+#   - Tái khởi tạo CosineAnnealingLR với đúng base_lrs (sửa lỗi base_lrs[0]=0.0 ở v2)
+#   - Backbone LR: 5e-6, Head LR: 5e-5, Stochastic Depth + Multi-Sample Dropout
+#   - Mask-aware MixUp α=0.2 (trộn đồng bộ cả ảnh lẫn GT mask)
 #
 # Pha 3 (epoch swa_start → end): SWA + Snapshot Ensemble
 #   - SWA LR: 1e-5, lưu snapshot mỗi epoch
-#   - Cuối cùng: trung bình weights từ n_snapshots checkpoints tốt nhất
+#   - Trung bình trọng số từ n_snapshots checkpoints có Val AUROC cao nhất
 #
-# Fix so với v1:
-#   ✅ Giữ ASL γ_neg=4 (KHÔNG giảm xuống 2)
-#   ✅ Giữ EMA decay=0.999
-#   ✅ Giữ Weight Decay=0.05
-#   ✅ Giữ UW clamp [-4, 4]
-#   ✅ Nạp EMA weights (state_dict) thay vì training_state_dict
-#   ✅ Thêm Warmup, MixUp, Label Smoothing, R-Drop, SWA
+# Các nâng cấp cốt lõi so với v2:
+#   ✅ Sửa lỗi HEAD_KEYWORDS thiếu 'gate_alpha_raw' (v2 ghi nhầm 'raw_alpha')
+#   ✅ Sửa lỗi CosineAnnealingLR khóa cứng base_lrs[0]=0.0 cho backbone ở Pha 2
+#   ✅ Tách decay (0.05) vs no_decay (0.0 cho bias, LayerNorm/BatchNorm, gate_alpha_raw)
+#   ✅ Nâng cấp AsymmetricLossOptimized: gamma_neg=1.0 cho No Finding, mild pos_weights cho lớp hiếm
+#   ✅ Nâng cấp AttentionSparsityLoss: Class-conditional Hinge Area + MIL Spatial Peak
+#   ✅ Mask-aware MixUp: trộn cả masks theo lam để không làm hỏng tín hiệu Dice Loss
 # ============================================================================
 import os
+import sys
 import time
 import copy
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
 from tqdm import tqdm
 from collections import OrderedDict
 import numpy as np
@@ -39,6 +48,14 @@ from typing import Optional, List, Dict
 from torch.optim.swa_utils import AveragedModel, SWALR
 
 from Model import HybridCNNViTModel
+from TrainModel import (
+    AsymmetricLossOptimized,
+    ModelEMA,
+    DiceLoss,
+    AttentionSparsityLoss,
+    UncertaintyWeighting,
+    build_optimizer_param_groups,
+)
 from read_data import DatasetGenerator, FastDataLoader, HybridBatchSampler, VINDR_SOURCE_NAME
 from checkpoint_utils import load_checkpoint_safe, extract_state_dict
 
@@ -53,188 +70,13 @@ def _unwrap_model(model):
 
 
 # ============================================================================
-# Loss Functions — GIỮ NGUYÊN CONFIG GỐC
-# ============================================================================
-
-class AsymmetricLossOptimized(nn.Module):
-    """ASL giữ nguyên gamma_neg=4 như training gốc.
-
-    FIX: v1 giảm gamma_neg=2 khiến gradient từ True Negative dễ tràn trở lại
-    → model bị kéo về đoán "Không bệnh" → Accuracy tăng nhưng AUROC giảm.
-    """
-    def __init__(self, gamma_neg=4, gamma_pos=0, clip=0.05, eps=1e-4,
-                 disable_torch_grad_focal_loss=True, label_smoothing=0.0):
-        super().__init__()
-        self.gamma_neg = gamma_neg
-        self.gamma_pos = gamma_pos
-        self.clip = clip
-        self.eps = eps
-        self.disable_torch_grad_focal_loss = disable_torch_grad_focal_loss
-        self.label_smoothing = label_smoothing
-
-    def forward(self, logits, targets):
-        # Label smoothing: 0 → ε/2, 1 → 1-ε/2
-        if self.label_smoothing > 0:
-            targets = targets * (1 - self.label_smoothing) + self.label_smoothing / 2
-
-        xs_pos = torch.sigmoid(logits)
-        xs_neg = 1 - xs_pos
-        if self.clip > 0:
-            xs_neg = (xs_neg + self.clip).clamp(max=1)
-        los_pos = targets * torch.log(xs_pos.clamp(min=self.eps))
-        los_neg = (1 - targets) * torch.log(xs_neg.clamp(min=self.eps))
-        loss = los_pos + los_neg
-        if self.gamma_neg > 0 or self.gamma_pos > 0:
-            if self.disable_torch_grad_focal_loss:
-                with torch.no_grad():
-                    pt0 = xs_pos * targets
-                    pt1 = xs_neg * (1 - targets)
-                    pt = pt0 + pt1
-                    one_sided_gamma = self.gamma_pos * targets + self.gamma_neg * (1 - targets)
-                    one_sided_w = torch.pow(1 - pt, one_sided_gamma)
-            else:
-                pt0 = xs_pos * targets
-                pt1 = xs_neg * (1 - targets)
-                pt = pt0 + pt1
-                one_sided_gamma = self.gamma_pos * targets + self.gamma_neg * (1 - targets)
-                one_sided_w = torch.pow(1 - pt, one_sided_gamma)
-            loss *= one_sided_w
-        return -loss.sum() / logits.shape[0]
-
-
-class ModelEMA:
-    """EMA giữ nguyên decay=0.999 như training gốc."""
-    def __init__(self, model, decay=0.999):
-        self.decay = decay
-        self.shadow = {}
-        self.backup = {}
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
-        for name, buf in model.named_buffers():
-            self.shadow[name] = buf.data.clone()
-
-    @torch.no_grad()
-    def update(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad and name in self.shadow:
-                self.shadow[name].mul_(self.decay).add_(param.data, alpha=1 - self.decay)
-        for name, buf in model.named_buffers():
-            if name in self.shadow:
-                if self.shadow[name].is_floating_point():
-                    self.shadow[name].mul_(self.decay).add_(buf.data, alpha=1 - self.decay)
-                else:
-                    self.shadow[name].copy_(buf.data)
-
-    def apply_shadow(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad and name in self.shadow:
-                self.backup[name] = param.data.clone()
-                param.data.copy_(self.shadow[name])
-        for name, buf in model.named_buffers():
-            if name in self.shadow:
-                self.backup[name] = buf.data.clone()
-                buf.data.copy_(self.shadow[name])
-
-    def restore(self, model):
-        for name, param in model.named_parameters():
-            if name in self.backup:
-                param.data.copy_(self.backup[name])
-        for name, buf in model.named_buffers():
-            if name in self.backup:
-                buf.data.copy_(self.backup[name])
-        self.backup = {}
-
-    def reinit_from_model(self, model):
-        """Reinitialize EMA shadows from current model (for phase transitions)."""
-        self.shadow = {}
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
-        for name, buf in model.named_buffers():
-            self.shadow[name] = buf.data.clone()
-
-
-class DiceLoss(nn.Module):
-    """Dice Loss + Focal Tversky (giữ nguyên từ code gốc)."""
-    def __init__(self, smooth=1e-4, mask_smooth=0.0, tversky_alpha=0.3, tversky_beta=0.7,
-                 tversky_weight=0.6, focal_gamma=0.75):
-        super().__init__()
-        self.smooth = smooth
-        self.mask_smooth = mask_smooth
-        self.tversky_alpha = tversky_alpha
-        self.tversky_beta = tversky_beta
-        self.tversky_weight = tversky_weight
-        self.focal_gamma = focal_gamma
-        self.last_raw_dice = 0.0
-
-    def forward(self, preds, targets, valid_mask):
-        targets = F.interpolate(targets, size=preds.shape[2:], mode='bilinear', align_corners=False)
-        if self.mask_smooth > 0:
-            targets = targets * (1 - 2 * self.mask_smooth) + self.mask_smooth
-        valid_mask = valid_mask.bool()
-        if valid_mask.sum() == 0:
-            self.last_raw_dice = 0.0
-            return preds.sum() * 0.0
-        preds_valid = preds[valid_mask]
-        targets_valid = targets[valid_mask]
-        preds_flat = preds_valid.contiguous().view(-1)
-        targets_flat = targets_valid.contiguous().view(-1)
-        intersection = (preds_flat * targets_flat).sum()
-        dice = (2. * intersection + self.smooth) / (preds_flat.sum() + targets_flat.sum() + self.smooth)
-        self.last_raw_dice = dice.item()
-        dice_loss = 1 - dice
-        TP = (preds_flat * targets_flat).sum()
-        FP = (preds_flat * (1 - targets_flat)).sum()
-        FN = ((1 - preds_flat) * targets_flat).sum()
-        tversky = (TP + self.smooth) / (TP + self.tversky_alpha * FP + self.tversky_beta * FN + self.smooth)
-        focal_tversky_loss = (1 - tversky).clamp(min=1e-6) ** self.focal_gamma
-        return (1 - self.tversky_weight) * dice_loss + self.tversky_weight * focal_tversky_loss
-
-
-class AttentionSparsityLoss(nn.Module):
-    """Sparsity regularization (giữ nguyên từ code gốc)."""
-    def __init__(self, l1_weight=0.1, entropy_weight=0.05):
-        super().__init__()
-        self.l1_weight = l1_weight
-        self.entropy_weight = entropy_weight
-
-    def forward(self, attention_map):
-        l1_loss = attention_map.mean()
-        eps = 1e-4
-        a = attention_map.clamp(eps, 1 - eps)
-        entropy = -(a * torch.log(a) + (1 - a) * torch.log(1 - a))
-        entropy_loss = entropy.mean()
-        return self.l1_weight * l1_loss + self.entropy_weight * entropy_loss
-
-
-class UncertaintyWeighting(nn.Module):
-    """UW giữ nguyên clamp [-4, 4] như training gốc."""
-    def __init__(self, n_tasks=2):
-        super().__init__()
-        self.log_vars = nn.Parameter(torch.zeros(n_tasks))
-
-    def forward(self, *losses, active_mask=None):
-        total = 0
-        weighted_losses = []
-        clamped_log_vars = torch.clamp(self.log_vars, min=-4.0, max=4.0)
-        for i, loss in enumerate(losses):
-            if active_mask is not None and not active_mask[i]:
-                weighted_losses.append(0.0)
-                continue
-            precision = torch.exp(-clamped_log_vars[i])
-            weighted = 0.5 * precision * loss + 0.5 * clamped_log_vars[i]
-            total += weighted
-            weighted_losses.append(weighted.item())
-        return total, weighted_losses
-
-
-# ============================================================================
 # Freeze / Unfreeze Utilities
 # ============================================================================
 
-HEAD_KEYWORDS = ['attention_head', 'fpn_lateral', 'fpn_merge', 'classifier',
-                 'raw_alpha', 'channel_proj']
+HEAD_KEYWORDS = [
+    'attention_head', 'fpn_lateral', 'fpn_merge', 'classifier',
+    'gate_alpha_raw', 'raw_alpha', 'channel_proj'
+]
 
 
 def _is_head_param(name: str) -> bool:
@@ -243,15 +85,17 @@ def _is_head_param(name: str) -> bool:
 
 
 def freeze_backbone(model):
-    """Freeze tất cả backbone params, chỉ giữ head trainable."""
+    """Freeze tất cả backbone params, chỉ giữ head + gate_alpha_raw trainable."""
     raw = _unwrap_model(model)
     frozen_count = 0
     for name, p in raw.named_parameters():
         if not _is_head_param(name):
             p.requires_grad = False
             frozen_count += 1
+        else:
+            p.requires_grad = True
     trainable = sum(1 for p in raw.parameters() if p.requires_grad)
-    print(f"   ❄️  Frozen: {frozen_count} params | Trainable: {trainable} params (head only)")
+    print(f"   ❄️  Frozen: {frozen_count} tensors | Trainable: {trainable} tensors (head + gate)")
 
 
 def unfreeze_all(model):
@@ -259,24 +103,28 @@ def unfreeze_all(model):
     raw = _unwrap_model(model)
     for p in raw.parameters():
         p.requires_grad = True
-    total = sum(1 for p in raw.parameters())
-    print(f"   🔓 Unfrozen ALL: {total} params trainable")
+    total = sum(1 for _ in raw.parameters())
+    print(f"   🔓 Unfrozen ALL: {total} tensors trainable")
 
 
 # ============================================================================
-# MixUp Utility
+# Mask-Aware MixUp Utility
 # ============================================================================
 
-def mixup_data(x, y, alpha=0.2):
-    """MixUp augmentation: trộn ảnh và nhãn."""
+def mixup_data_with_masks(x, y, masks=None, alpha=0.2):
+    """
+    MixUp đồng bộ trên cả ảnh (x), nhãn (y), và bản đồ phân vùng (masks).
+    Đảm bảo lam >= 0.5 để ảnh gốc và source_flags gốc luôn chiếm đa số.
+    """
     if alpha <= 0:
-        return x, y, y, 1.0
-    lam = np.random.beta(alpha, alpha)
-    lam = max(lam, 1 - lam)  # Đảm bảo lam >= 0.5 (ảnh gốc chiếm đa số)
+        return x, y, y, masks, 1.0
+    lam = float(np.random.beta(alpha, alpha))
+    lam = max(lam, 1.0 - lam)  # Đảm bảo lam >= 0.5 (ảnh gốc chiếm đa số)
     batch_size = x.size(0)
     index = torch.randperm(batch_size, device=x.device)
-    mixed_x = lam * x + (1 - lam) * x[index]
-    return mixed_x, y, y[index], lam
+    mixed_x = lam * x + (1.0 - lam) * x[index]
+    mixed_masks = (lam * masks + (1.0 - lam) * masks[index]) if masks is not None else None
+    return mixed_x, y, y[index], mixed_masks, lam
 
 
 # ============================================================================
@@ -298,10 +146,10 @@ class SOTAFinetuneTrainer:
               preload_images: bool = False, num_workers_preload: int = 8,
               num_workers_train: int = 4,
               # === SOTA Fine-tune params ===
-              freeze_epochs: int = 3,
-              swa_start: int = 9,
+              freeze_epochs: int = 2,
+              swa_start: int = 5,
               mixup_alpha: float = 0.2,
-              rdrop_alpha: float = 0.5,
+              rdrop_alpha: float = 0.0,
               label_smoothing: float = 0.02,
               n_snapshots: int = 3):
 
@@ -332,13 +180,11 @@ class SOTAFinetuneTrainer:
         model = HybridCNNViTModel(num_classes=15, model_size=model_size, img_size=img_size).to(device)
 
         # ── Load checkpoint: ƯU TIÊN state_dict (EMA weights) ──
-        # FIX: v1 dùng training_state_dict → điểm khởi đầu dao động hơn
         print(f"\n📥 Loading checkpoint: {checkpoint_path}")
         ckpt = load_checkpoint_safe(checkpoint_path, device)
         ckpt_epoch = ckpt.get('epoch', 0)
         ckpt_auroc = ckpt.get('best_auroc', 0.0)
 
-        # FIX: Ưu tiên EMA weights (state_dict) cho fine-tune
         if 'state_dict' in ckpt:
             state_dict = ckpt['state_dict']
             print("   ✅ Loaded state_dict (EMA weights — ổn định, tốt cho fine-tune)")
@@ -349,13 +195,15 @@ class SOTAFinetuneTrainer:
             state_dict = ckpt
             print("   ⚠️ Fallback: Loaded raw checkpoint")
 
-        # Clean keys
         cleaned = OrderedDict()
         for k, v in state_dict.items():
             name = k.replace('module.', '') if k.startswith('module.') else k
             cleaned[name] = v
         model.load_state_dict(cleaned, strict=False)
         print(f"   ✅ Model weights loaded (from epoch {ckpt_epoch}, AUROC {ckpt_auroc:.4f})")
+
+        # Lưu bản sao trọng số tốt nhất để khôi phục khi chuyển Pha 1 → Pha 2
+        best_ema_state_cpu = {k: v.detach().cpu().clone() for k, v in _unwrap_model(model).state_dict().items()}
         del ckpt  # Free memory
 
         # Multi-GPU
@@ -408,20 +256,23 @@ class SOTAFinetuneTrainer:
             datasetVal, batch_size=trBatchSize, shuffle=False, num_workers=num_workers_train
         )
 
-        # ── Optimizer (Phase 1: Head-only) ──
-        raw_model = _unwrap_model(model)
-        head_params = [p for n, p in raw_model.named_parameters() if _is_head_param(n)]
-        backbone_params = [p for n, p in raw_model.named_parameters() if not _is_head_param(n)]
-
-        optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': 0.0},  # Frozen — LR=0
-            {'params': head_params, 'lr': 2e-4},     # Head LR
-        ], weight_decay=0.05)  # FIX: giữ nguyên gốc
+        # ── Optimizer (Phase 1: Head-only, tách chuẩn decay vs no_decay) ──
+        param_groups = build_optimizer_param_groups(
+            model, backbone_lr=0.0, head_lr=2e-4, weight_decay=0.05
+        )
+        optimizer = optim.AdamW(param_groups, weight_decay=0.05)
 
         # ── Loss Functions ──
+        no_finding_idx = SOTAFinetuneTrainer.CLASS_NAMES.index('No Finding')
+        freqs = datasetTrain.class_frequencies.clamp(min=1e-4, max=1.0 - 1e-4)
+        pos_weights = torch.pow((1.0 - freqs) / freqs, 0.15).clamp(min=1.0, max=2.5)
+        pos_weights[no_finding_idx] = 1.0
+
         criterion_bce = AsymmetricLossOptimized(
-            gamma_neg=4, gamma_pos=0, clip=0.05,  # FIX: giữ gamma_neg=4
-            label_smoothing=label_smoothing
+            gamma_neg=4, gamma_pos=0, clip=0.05,
+            label_smoothing=label_smoothing,
+            pos_weights=pos_weights.to(device),
+            no_finding_idx=no_finding_idx,
         )
         criterion_val = nn.BCEWithLogitsLoss()
         criterion_dice = DiceLoss()
@@ -429,16 +280,21 @@ class SOTAFinetuneTrainer:
 
         # ── Uncertainty Weighting ──
         uncertainty_weights = UncertaintyWeighting(n_tasks=2).to(device)
-        optimizer.add_param_group({'params': uncertainty_weights.parameters(), 'lr': 1e-3})
+        optimizer.add_param_group({
+            'params': uncertainty_weights.parameters(),
+            'lr': 1e-3,
+            'weight_decay': 0.0,
+            'group_name': 'uncertainty_weights'
+        })
 
-        # ── Scheduler: Warmup → Cosine ──
-        warmup_epochs = min(2, freeze_epochs)
-        cosine_epochs = max(1, swa_start - warmup_epochs)
+        # ── Scheduler Pha 1 (Warmup → Cosine cho giai đoạn Head-only) ──
+        warmup_epochs = min(1, max(1, freeze_epochs))
+        p1_cosine_epochs = max(1, freeze_epochs - warmup_epochs)
         warmup_scheduler = optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+            optimizer, start_factor=0.2, end_factor=1.0, total_iters=warmup_epochs
         )
         cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=cosine_epochs, eta_min=1e-6
+            optimizer, T_max=p1_cosine_epochs, eta_min=5e-5
         )
         scheduler = optim.lr_scheduler.SequentialLR(
             optimizer, schedulers=[warmup_scheduler, cosine_scheduler],
@@ -447,37 +303,41 @@ class SOTAFinetuneTrainer:
 
         # ── EMA ──
         target_model = _unwrap_model(model)
-        ema = ModelEMA(target_model, decay=0.999)  # FIX: giữ 0.999
+        ema = ModelEMA(target_model, decay=0.999)
 
         # ── SWA (khởi tạo cho Phase 3) ──
+        raw_model = _unwrap_model(model)
         swa_model = AveragedModel(raw_model)
-        swa_scheduler = SWALR(optimizer, swa_lr=1e-5, anneal_epochs=2)
+        swa_scheduler = None  # Khởi tạo khi bước vào Pha 3 để lấy đúng base_lrs
 
         # ── Print Config ──
         print(f"\n{'='*70}")
-        print(f"🔬 SOTA FINE-TUNE CONFIG — 3-Phase Strategy")
+        print(f"🔬 SOTA FINE-TUNE CONFIG v2.1 — Optimized 3-Phase Strategy")
         print(f"{'='*70}")
-        print(f"  ASL gamma_neg: 4 (giữ nguyên gốc ✅)")
-        print(f"  Weight Decay: 0.05 (giữ nguyên gốc ✅)")
-        print(f"  EMA decay: 0.999 (giữ nguyên gốc ✅)")
-        print(f"  UW clamp: [-4, 4] (giữ nguyên gốc ✅)")
+        print(f"  ASL gamma_neg: 4 (NoFinding=1.0, Mild PosWeights=ON ✅)")
+        print(f"  Sparsity: Class-Conditional Hinge Area + MIL Peak ✅")
+        print(f"  Weight Decay: 0.05 (decay) / 0.0 (no_decay norms & biases) ✅")
+        print(f"  EMA decay: 0.999 ✅")
         print(f"  Label Smoothing: {label_smoothing}")
-        print(f"  MixUp alpha: {mixup_alpha} (Pha 2+)")
-        print(f"  R-Drop alpha: {rdrop_alpha} (Pha 2+)")
-        print(f"  ── Pha 1 (epoch 1-{freeze_epochs}): Freeze backbone, Head LR=2e-4 ──")
-        print(f"  ── Pha 2 (epoch {freeze_epochs+1}-{swa_start-1}): Unfreeze, Backbone=5e-6, Head=5e-5 ──")
+        print(f"  MixUp alpha: {mixup_alpha} (Mask-aware, Pha 2+)")
+        print(f"  R-Drop alpha: {rdrop_alpha} (Multi-Sample Dropout tích hợp sẵn trong Head)")
+        print(f"  ── Pha 1 (epoch 1-{freeze_epochs}): Freeze backbone, Head+Gate LR=2e-4 ──")
+        print(f"  ── Pha 2 (epoch {freeze_epochs+1}-{swa_start-1}): Unfreeze từ Best EMA, Backbone=5e-6, Head=5e-5 ──")
         print(f"  ── Pha 3 (epoch {swa_start}-{trMaxEpoch}): SWA LR=1e-5, {n_snapshots} snapshots ──")
         print(f"{'='*70}")
 
         # ── Freeze backbone for Phase 1 ──
-        print("\n🧊 Pha 1: Freeze backbone...")
-        freeze_backbone(model)
+        if freeze_epochs > 0:
+            print("\n🧊 Pha 1: Freeze backbone...")
+            freeze_backbone(model)
+            current_phase = 1
+        else:
+            current_phase = 1  # sẽ chuyển ngay sang Pha 2 ở ft_epoch == 1
 
         # ── Training Loop ──
         bestAUROC = ckpt_auroc
         epochs_no_improve = 0
-        early_stop_patience = 10
-        current_phase = 1
+        early_stop_patience = 6
         snapshots = []
         snapshot_aurocs = []
 
@@ -494,22 +354,53 @@ class SOTAFinetuneTrainer:
             if ft_epoch == freeze_epochs + 1 and current_phase == 1:
                 current_phase = 2
                 print(f"\n{'='*60}")
-                print(f"🔓 CHUYỂN SANG PHA 2: Unfreeze + MixUp + R-Drop")
+                print(f"🔓 CHUYỂN SANG PHA 2: Unfreeze Toàn Bộ + Mask-Aware MixUp")
                 print(f"{'='*60}")
+                # Khôi phục bộ trọng số EMA tốt nhất đã đạt được (baseline hoặc Pha 1)
+                _unwrap_model(model).load_state_dict(
+                    {k: v.to(device) for k, v in best_ema_state_cpu.items()}, strict=False
+                )
+                print(f"   🔄 Đã khôi phục Best EMA weights (AUROC={bestAUROC:.4f}) làm điểm xuất phát cho Pha 2")
                 unfreeze_all(model)
-                optimizer.param_groups[0]['lr'] = 5e-6   # Backbone
-                optimizer.param_groups[1]['lr'] = 5e-5   # Head
-                ema.reinit_from_model(_unwrap_model(model))
-                print(f"   📊 EMA re-initialized from current weights")
 
-            elif ft_epoch == swa_start and current_phase == 2:
+                p2_backbone_lr = 5e-6 if model_size == 'large' else 1e-5
+                p2_head_lr = 5e-5
+                for pg in optimizer.param_groups:
+                    gname = pg.get('group_name', '')
+                    if gname.startswith('backbone'):
+                        pg['lr'] = p2_backbone_lr
+                    elif gname.startswith('head'):
+                        pg['lr'] = p2_head_lr
+
+                # BUG FIX: Tạo mới CosineAnnealingLR sau khi gán LR>0 cho backbone,
+                # đảm bảo base_lrs của group backbone được ghi nhận là 5e-6 thay vì 0.0!
+                p2_epochs = max(1, swa_start - freeze_epochs - 1)
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=p2_epochs, eta_min=1e-6
+                )
+                ema = ModelEMA(_unwrap_model(model), decay=0.999)
+                print(f"   📊 EMA & CosineScheduler re-initialized (backbone_lr={p2_backbone_lr:.1e}, head_lr={p2_head_lr:.1e}, T_max={p2_epochs})")
+
+            if ft_epoch == swa_start and current_phase <= 2:
                 current_phase = 3
                 print(f"\n{'='*60}")
                 print(f"📊 CHUYỂN SANG PHA 3: SWA + Snapshot Ensemble")
                 print(f"{'='*60}")
-                print(f"   SWA LR: 1e-5 | Snapshots: {n_snapshots}")
+                _unwrap_model(model).load_state_dict(
+                    {k: v.to(device) for k, v in best_ema_state_cpu.items()}, strict=False
+                )
+                unfreeze_all(model)
+                for pg in optimizer.param_groups:
+                    gname = pg.get('group_name', '')
+                    if gname.startswith('backbone'):
+                        pg['lr'] = 5e-6
+                    elif gname.startswith('head'):
+                        pg['lr'] = 2e-5
+                swa_scheduler = SWALR(optimizer, swa_lr=5e-6, anneal_epochs=1)
+                ema = ModelEMA(_unwrap_model(model), decay=0.999)
+                print(f"   SWA LR: 5e-6 | Snapshots: {n_snapshots}")
 
-            phase_label = {1: "HEAD-ONLY", 2: "FULL+MixUp+R-Drop", 3: "SWA"}[current_phase]
+            phase_label = {1: "HEAD+GATE ONLY", 2: "FULL+MixUp+MSD", 3: "SWA+SNAPSHOT"}[current_phase]
             print(f"\n{'='*60}")
             print(f"Epoch [{global_epoch}] (ft {ft_epoch}/{trMaxEpoch}) — PHA {current_phase}: {phase_label}")
             print(f"{'='*60}")
@@ -518,7 +409,6 @@ class SOTAFinetuneTrainer:
             use_rdrop = (current_phase >= 2 and rdrop_alpha > 0)
 
             # ── Train ──
-            no_finding_idx = SOTAFinetuneTrainer.CLASS_NAMES.index('No Finding')
             trainLoss, bceLoss, diceLoss, sparsityLoss, rawDice = SOTAFinetuneTrainer.epochTrain(
                 model, dataLoaderTrain, optimizer, criterion_bce, criterion_dice,
                 criterion_sparsity, device, no_finding_idx=no_finding_idx,
@@ -539,9 +429,14 @@ class SOTAFinetuneTrainer:
 
             # ── SWA update (Phase 3) ──
             if current_phase == 3:
-                swa_model.update_parameters(_unwrap_model(model))
-                swa_scheduler.step()
-                snapshot_state = {k: v.cpu().clone() for k, v in _unwrap_model(model).state_dict().items()}
+                target_model_ref = _unwrap_model(model)
+                ema.apply_shadow(target_model_ref)
+                swa_model.update_parameters(target_model_ref)
+                snapshot_state = {k: v.cpu().clone() for k, v in target_model_ref.state_dict().items()}
+                ema.restore(target_model_ref)
+
+                if swa_scheduler is not None:
+                    swa_scheduler.step()
                 snapshots.append(snapshot_state)
                 snapshot_aurocs.append(valAUROC)
                 print(f"   📸 Snapshot #{len(snapshots)} saved (AUROC: {valAUROC:.4f})")
@@ -559,12 +454,12 @@ class SOTAFinetuneTrainer:
                   f"Raw Dice: {rawDice:.4f} | Sparsity: {sparsityLoss:.4f}")
             print(f"Val   - Loss: {valLoss:.4f}   | AUROC: {valAUROC:.4f} | Acc: {valAcc:.4f}")
             if use_mixup:
-                print(f"   🔀 MixUp: alpha={mixup_alpha}")
+                print(f"   🔀 Mask-Aware MixUp: alpha={mixup_alpha}")
             if use_rdrop:
                 print(f"   🔄 R-Drop: alpha={rdrop_alpha}")
 
             for i, pg in enumerate(optimizer.param_groups):
-                label = ['backbone', 'head', 'uw'][i] if i < 3 else f'group_{i}'
+                label = pg.get('group_name', f'group_{i}')
                 print(f"   LR {label}: {pg['lr']:.2e}")
 
             # ── Save & Early Stopping ──
@@ -581,6 +476,8 @@ class SOTAFinetuneTrainer:
                     if name in ema_state:
                         ema_state[name] = ema_val.cpu()
 
+                best_ema_state_cpu = {k: v.cpu().clone() for k, v in ema_state.items()}
+
                 torch.save({
                     'epoch': global_epoch,
                     'state_dict': ema_state,
@@ -590,10 +487,10 @@ class SOTAFinetuneTrainer:
                     'model_size': model_size,
                     'img_size': img_size,
                     'finetuned': True,
-                    'finetune_version': 'SOTA_v2',
+                    'finetune_version': 'SOTA_v2.1',
                     'phase': current_phase,
                     'finetune_config': {
-                        'strategy': '3-phase SOTA',
+                        'strategy': '3-phase SOTA v2.1',
                         'freeze_epochs': freeze_epochs,
                         'swa_start': swa_start,
                         'mixup_alpha': mixup_alpha,
@@ -630,7 +527,7 @@ class SOTAFinetuneTrainer:
             avg_state = {}
             for key in selected_snapshots[0]:
                 tensors = [s[key].float() for s in selected_snapshots]
-                avg_state[key] = torch.stack(tensors).mean(dim=0)
+                avg_state[key] = torch.stack(tensors).mean(dim=0).to(selected_snapshots[0][key].dtype)
 
             raw_model_eval = _unwrap_model(model)
             raw_model_eval.load_state_dict(avg_state)
@@ -652,7 +549,7 @@ class SOTAFinetuneTrainer:
                     'model_size': model_size,
                     'img_size': img_size,
                     'finetuned': True,
-                    'finetune_version': 'SOTA_v2_ensemble',
+                    'finetune_version': 'SOTA_v2.1_ensemble',
                     'n_snapshots': len(selected_snapshots),
                 }, ensemble_path)
                 file_size_mb = os.path.getsize(ensemble_path) / (1024 * 1024)
@@ -668,7 +565,7 @@ class SOTAFinetuneTrainer:
         elif delta == 0:
             print(f"   ➡️  Không thay đổi")
         else:
-            print(f"   📉 Không cải thiện so với baseline")
+            print(f"   📉 Không cải thiện so với baseline (checkpoint gốc vẫn giữ nguyên)")
         print(f"   Snapshots collected: {len(snapshots)}")
         print(f"   Model saved: {pathModel}")
         print(f"{'='*60}")
@@ -679,7 +576,7 @@ class SOTAFinetuneTrainer:
                    scaler=None, amp_dtype=torch.float32, ema=None,
                    uncertainty_weights=None,
                    use_mixup=False, mixup_alpha=0.2,
-                   use_rdrop=False, rdrop_alpha=0.5):
+                   use_rdrop=False, rdrop_alpha=0.0):
         model.train()
         total_loss, total_bce, total_dice, total_sparsity = 0.0, 0.0, 0.0, 0.0
         total_raw_dice = 0.0
@@ -694,11 +591,15 @@ class SOTAFinetuneTrainer:
             masks = masks.to(device, non_blocking=True)
             source_flags = source_flags.to(device, non_blocking=True)
 
-            # ── MixUp ──
+            # ── Mask-Aware MixUp ──
             if use_mixup:
-                inputs, targets_a, targets_b, lam = mixup_data(inputs, targets, mixup_alpha)
+                inputs, targets_a, targets_b, masks_mixed, lam = mixup_data_with_masks(
+                    inputs, targets, masks, mixup_alpha
+                )
+                effective_targets = lam * targets_a.float() + (1.0 - lam) * targets_b.float()
             else:
-                targets_a, targets_b, lam = targets, targets, 1.0
+                targets_a, targets_b, masks_mixed, lam = targets, targets, masks, 1.0
+                effective_targets = targets.float()
 
             optimizer.zero_grad(set_to_none=True)
 
@@ -717,12 +618,12 @@ class SOTAFinetuneTrainer:
             # ── ASL Loss (with MixUp) ──
             if use_mixup:
                 bce_loss = lam * criterion_bce(logits, targets_a.float()) + \
-                           (1 - lam) * criterion_bce(logits, targets_b.float())
+                           (1.0 - lam) * criterion_bce(logits, targets_b.float())
             else:
                 bce_loss = criterion_bce(logits, targets.float())
             total_bce += bce_loss.item()
 
-            # ── R-Drop Consistency ──
+            # ── Optional R-Drop Consistency ──
             rdrop_loss = torch.tensor(0.0, device=device)
             if use_rdrop:
                 with torch.amp.autocast('cuda', dtype=amp_dtype, enabled=use_amp_flag):
@@ -733,16 +634,16 @@ class SOTAFinetuneTrainer:
                 rdrop_loss = (F.binary_cross_entropy(p1, p2.detach()) +
                               F.binary_cross_entropy(p2, p1.detach())) * 0.5
 
-            # ── Sparsity Loss ──
-            sparsity_loss = criterion_sparsity(attention_maps)
+            # ── Class-Conditional Sparsity + MIL Peak Loss ──
+            sparsity_loss = criterion_sparsity(attention_maps, effective_targets, no_finding_idx=no_finding_idx)
             total_sparsity += sparsity_loss.item()
 
-            # ── Dice Loss (VinDr only) ──
+            # ── Dice Loss (VinDr only, dùng masks_mixed đồng bộ với ảnh) ──
             dice_loss_val = torch.tensor(0.0, device=device)
             has_valid_dice = False
             if vin_mask.sum() > 0:
                 vin_attention = attention_maps[vin_mask]
-                vin_gt_masks = masks[vin_mask].float()
+                vin_gt_masks = masks_mixed[vin_mask].float()
                 valid_mask = (vin_gt_masks.sum(dim=(2, 3)) > 0)
                 valid_mask[:, no_finding_idx] = False
                 has_valid_dice = valid_mask.sum() > 0
