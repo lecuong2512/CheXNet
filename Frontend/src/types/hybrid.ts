@@ -59,10 +59,19 @@ export interface YoloDetection {
     bbox?: { x1: number; y1: number; x2: number; y2: number };
 }
 
+export interface HybridBox {
+    disease: string;
+    confidence: number;
+    probability: number;
+    source: string;
+    bbox?: { x1: number; y1: number; x2: number; y2: number };
+}
+
 export interface HybridAnalysis {
     predictions: HybridPrediction[];
     all_probabilities: { disease: string; probability: number }[];
     yolo_detections: YoloDetection[];
+    hybrid_boxes?: HybridBox[];
     co_occurrences: { diseases: string[]; correlation: number; clinical_note: string }[];
     similar_cases: { filename: string; similarity: number; diseases: string[] }[];
     clinical_report: {
