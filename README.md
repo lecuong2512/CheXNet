@@ -162,7 +162,7 @@ Nhánh định vị chạy song song mô hình **YOLO11m** (Ultralytics) đượ
   - **C2PSA (Cross Stage Partial with Pointwise Spatial Attention)**: Bổ sung cơ chế tự chú ý điểm ảnh trong cổ mạng (Neck), giúp khoanh chính xác viền bờ tổn thương mờ nhạt.
   - **SPPF (Spatial Pyramid Pooling - Fast)**: Tích hợp ngữ cảnh đa thang đo với độ trễ tối thiểu.
   - **Decoupled Head**: Tách riêng hoàn toàn nhánh tính hồi quy tọa độ hộp giới hạn (DFL + CIoU Loss) và nhánh phân loại nhãn.
-- **Đồng bộ nhãn**: 14 lớp bệnh lý giải phẫu đồng bộ hoàn toàn 1:1 với CheXNet (trừ *No Finding*).
+- **Ánh xạ nhãn**: checkpoint YOLO hiện đang dùng gồm 14 lớp VinDr-CXR, có thứ tự riêng với bộ phân loại CheXNet. Backend ánh xạ các lớp tương ứng để tính Cascade; các lớp như Aortic enlargement, Calcification hoặc ILD giữ tên nhóm VinDr. Không đồng nhất 14 lớp VinDr với 14 nhãn bệnh của Hybrid.
 
 ---
 
@@ -643,7 +643,7 @@ Truy cập trình duyệt tại địa chỉ: `http://localhost:5173` để tr�
 
 ## 📚 Danh Mục Bệnh Lý Nhận Diện
 
-Hệ thống phân loại và định vị 15 nhãn bệnh lý lồng ngực theo tiêu chuẩn quốc tế:
+Mô hình phân loại **14 nhãn bệnh lý/dấu hiệu và 1 nhãn “No Finding”**. Bảng dưới theo đúng thứ tự kênh đầu ra của mã huấn luyện và suy luận; tên tiếng Việt cũng được dùng trên web. Định vị bằng YOLO chỉ có khi đã nạp trọng số tương ứng.
 
 | STT | Tên tiếng Anh | Tên tiếng Việt | Mức độ lâm sàng |
 |:---:|:---|:---|:---:|
@@ -662,6 +662,17 @@ Hệ thống phân loại và định vị 15 nhãn bệnh lý lồng ngực the
 | 12 | **Fibrosis** | Xơ hóa phổi | Bệnh mạn tính |
 | 13 | **Pleural Thickening** | Dày màng phổi | Theo dõi |
 | 14 | **Hernia** | Thoát vị hoành | Hiếm gặp |
+
+Tên hiển thị “Pleural Thickening” tương ứng khóa kỹ thuật `Pleural_Thickening`; không đổi tên khóa trong dữ liệu hoặc hoán đổi thứ tự đầu ra. Các mô tả kích thước trong tên Mass/Nodule thuộc danh mục nhãn, không phải số đo tổn thương mà web đã đo được từ ảnh tải lên.
+
+### Kết quả của checkpoint đang chạy trên web
+
+- Checkpoint cục bộ là bản fine-tune `SOTA_v2`, epoch 13, `best_auroc` lưu trong checkpoint là **0,86565**. Các bảng kết quả NIH/Hybrid ở trên mô tả các lần thực nghiệm, không phải cam kết độ chính xác của checkpoint này trên mọi ảnh người dùng.
+- Trên mẫu ngoại bộ đã kiểm tra gồm 100 ảnh NORMAL và 100 ảnh PNEUMONIA: accuracy nhãn Pneumonia ở ngưỡng 0,5 là **52%**, độ nhạy **4%**. Đây là phép thử riêng trên X-quang trẻ em, không phải accuracy chung của 14 bệnh. Xem [báo cáo 200 ảnh](docs/danh-gia-200-anh-2026-11-08.md).
+- Danh sách bệnh trên web lấy từ **đủ 15 xác suất và ngưỡng của lần suy luận**, không lấy giới hạn 6 bản đồ chú ý làm giới hạn số bệnh. Trọng số, điểm dự đoán và kỹ thuật Hybrid gốc được giữ nguyên. Xem [đối chiếu nhãn và kết quả hiển thị](docs/doi-chieu-nhan-va-ket-qua-2026-11-09.md).
+- Đã nối trọng số YOLO do người dùng cung cấp vào `Trainedmodel/yolov11m.pt`: 14 lớp VinDr-CXR, epoch 45. Ảnh mới được phân tích qua cả Hybrid và YOLO; viewer hiển thị khung trên ảnh gốc. Xem [kiểm chứng nối YOLO](docs/noi-yolo-2026-11-09.md). Trọng số được giữ ngoài Git theo `.gitignore`.
+- Chạy lại cùng 200 ảnh sau khi bật YOLO: 200/200 lượt thành công, 76 khung trên 50 ảnh; accuracy Pneumonia vẫn 52%, độ nhạy 4%. Xem [đối chiếu trước/sau](docs/kiem-thu-lai-yolo-2026-11-09.md); số khung không phải độ chính xác định vị.
+- Mỗi lượt phân tích mới có mã đối chiếu thực thi trong web, database và PDF, ghi nhận bằng hook trực tiếp trên model. Xem [cách kiểm chứng gọi model](docs/kiem-chung-goi-model.md).
 
 ---
 

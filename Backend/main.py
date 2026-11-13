@@ -49,6 +49,7 @@ model = None
 device = None
 transform_inference = None  # Pipeline tiền xử lý hoàn chỉnh (PIL → Tensor), thống nhất với predict_single.py
 yolo_detector = None  # YOLO11m object detector
+current_model_info = {}
 report_gen = ClinicalReportGenerator()
 cbir_finder = SimilarCaseFinder()
 
@@ -67,7 +68,7 @@ CLINICAL_THRESHOLDS = get_clinical_thresholds()
 
 @app.on_event("startup")
 def load_model():
-    global model, device, transform_inference, yolo_detector, optimal_thresholds
+    global model, device, transform_inference, yolo_detector, optimal_thresholds, current_model_info
     import gc
     import os
     import numpy as np
@@ -85,10 +86,17 @@ def load_model():
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
     print(f"\n[BACKEND] Starting Backend - Target device: {device} ({device_name})", flush=True)
     
-    # Mọi đường dẫn tính từ thư mục CheXNet
-    model_path = os.path.join(project_root, "Trainedmodel", "hybrid_model.pth")
+    # Mọi đường dẫn tính từ thư mục CheXNet; ưu tiên MODEL_PATH hoặc hybrid_large_v2.pth
+    env_model_path = os.environ.get("MODEL_PATH", "").strip()
+    if env_model_path:
+        model_path = env_model_path if os.path.isabs(env_model_path) else os.path.join(project_root, env_model_path)
+    else:
+        model_path = os.path.join(project_root, "Trainedmodel", "hybrid_large_v2.pth")
+
     if not os.path.exists(model_path):
         for alt in [
+            os.path.join(project_root, "Trainedmodel", "hybrid_large_v2.pth"),
+            os.path.join(project_root, "Trainedmodel", "hybrid_model.pth"),
             r"CheXNet\Trainedmodel\hybrid_model.pth",
             os.path.join(os.path.dirname(project_root), "CheXNet", "Trainedmodel", "hybrid_model.pth"),
             os.path.join(project_root, "Trainedmodel", "hybrid_model_light.pth")
@@ -155,12 +163,23 @@ def load_model():
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ])
         
+        ckpt_epoch = ckpt.get('epoch')
+        ckpt_auroc = ckpt.get('best_auroc')
+        current_model_info = {
+            "path": model_path,
+            "filename": os.path.basename(model_path),
+            "model_size": model_size,
+            "img_size": img_size,
+            "epoch": int(ckpt_epoch) if ckpt_epoch is not None else None,
+            "best_auroc": float(ckpt_auroc) if ckpt_auroc is not None else None,
+        }
+
         # Giai phong checkpoint khoi RAM sau khi da load xong
         del ckpt, cleaned_state_dict
         gc.collect()
         
         vram_allocated = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
-        print(f"[SUCCESS] CheXNet Model loaded onto {device} ({device_name}) SUCCESSFULLY! (VRAM: {vram_allocated:.3f} GB)\n", flush=True)
+        print(f"[SUCCESS] CheXNet Model ({current_model_info['filename']}) loaded onto {device} ({device_name}) SUCCESSFULLY! (VRAM: {vram_allocated:.3f} GB)\n", flush=True)
         
     except Exception as e:
         import traceback
@@ -178,7 +197,10 @@ def load_model():
                 yolo_path = alt
                 break
     yolo_detector = YOLODetector(model_path=yolo_path, device=device)
-    print(f"[BACKEND] YOLO11m detector loaded from: {yolo_path}", flush=True)
+    if yolo_detector.available:
+        print(f"[BACKEND] YOLO11m detector loaded from: {yolo_path}", flush=True)
+    else:
+        print(f"[WARN] YOLO11m detector could not be loaded from: {yolo_path}", flush=True)
 
 
 
@@ -188,7 +210,9 @@ def health_check():
         "status": "online",
         "model_loaded": model is not None,
         "yolo_loaded": yolo_detector is not None and yolo_detector.available,
-        "device": str(device) if device else "unknown"
+        "device": str(device) if device else "unknown",
+        "model_file": current_model_info.get("filename"),
+        "model_info": current_model_info,
     }
 
 @app.post("/predict")

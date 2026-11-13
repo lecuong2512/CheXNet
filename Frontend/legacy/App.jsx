@@ -29,6 +29,7 @@ export default function App() {
   // Backend & API Settings
   const [backendUrl, setBackendUrl] = useState('http://localhost:8000')
   const [backendStatus, setBackendStatus] = useState('unknown') // 'online' | 'offline' | 'unknown'
+  const [backendDevice, setBackendDevice] = useState('unknown')
 
   // Scanner Log Animation State
   const [analysisStep, setAnalysisStep] = useState(0)
@@ -38,7 +39,10 @@ export default function App() {
   const checkBackendHealth = useCallback(() => {
     fetch(`${backendUrl}/`)
       .then(res => res.ok ? res.json() : Promise.reject(res))
-      .then(data => setBackendStatus(data?.status === 'online' ? 'online' : 'offline'))
+      .then(data => {
+        setBackendStatus(['online', 'healthy'].includes(data?.status) && data?.model_loaded ? 'online' : 'offline')
+        setBackendDevice(data?.device || 'unknown')
+      })
       .catch(() => setBackendStatus('offline'))
   }, [backendUrl])
 
@@ -251,7 +255,7 @@ export default function App() {
     'Áp dụng cân bằng lịch sử CLAHE & chuẩn hóa ma trận...',
     'Đưa qua mạng backbone ConvNeXtV2 & SwinV2 Transformer...',
     'Trích xuất feature maps đặc trưng nhu mô phổi...',
-    'Khoanh vùng Grad-CAM Attention Hotspot tổn thương trọng điểm...',
+    'Đang tạo bản đồ vùng chú ý…',
     'Tổng hợp xác suất phân loại đa nhãn & tạo báo cáo lâm sàng chuẩn...'
   ]
 
@@ -264,7 +268,7 @@ export default function App() {
       
       {/* ── STICKY TOP NAVBAR ── */}
       <header className="sticky top-0 z-40 glass border-b" style={{ borderColor: 'rgba(0, 212, 255, 0.12)' }}>
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-6 flex items-center justify-between" style={{ minHeight: 64, flexWrap: 'wrap', gap: 12, paddingTop: 12, paddingBottom: 12 }}>
           
           {/* Logo & Platform Name */}
           <div className="flex items-center gap-3 cursor-pointer" onClick={resetAll}>
@@ -286,13 +290,13 @@ export default function App() {
                 CHEXNET<span style={{ color: '#00d4ff' }}>PRO</span> · <span style={{ color: '#00e5a0' }}>AI</span>
               </div>
               <div className="text-xs" style={{ color: '#4a6a8a', fontFamily: "'JetBrains Mono', monospace" }}>
-                Hybrid ConvNeXtV2 + SwinV2 · YOLO11m Detector
+                Mô hình kết hợp ConvNeXtV2 + SwinV2 · Định vị YOLO11m
               </div>
             </div>
           </div>
 
           {/* Navigation Tabs */}
-          <nav className="hidden md:flex items-center gap-1 bg-surface/50 p-1 rounded-xl border border-cyan/10" style={{ background: 'rgba(7, 22, 40, 0.6)' }}>
+          <nav aria-label="Công cụ nghiên cứu" className="flex items-center gap-1 bg-surface/50 p-1 rounded-xl border border-cyan/10" style={{ background: 'rgba(7, 22, 40, 0.6)', flexWrap: 'wrap', maxWidth: '100%' }}>
             {[
               { id: 'analysis', label: '🔬 Phân tích X-Quang' },
               { id: 'clinical_report', label: '🏥 Báo cáo Lâm Sàng' },
@@ -325,7 +329,7 @@ export default function App() {
               }}
             >
               <span className="w-2 h-2 rounded-full animate-pulse" style={{ background: backendStatus === 'online' ? '#00e5a0' : '#ffb020' }} />
-              {backendStatus === 'online' ? 'BACKEND PORT 8000 READY (GPU)' : 'CHECKING BACKEND PORT 8000'}
+              {backendStatus === 'online' ? `DỊCH VỤ AI SẴN SÀNG (${backendDevice.toUpperCase()})` : 'ĐANG KIỂM TRA KẾT NỐI AI'}
             </div>
           </div>
         </div>
@@ -362,7 +366,7 @@ export default function App() {
                     }}
                   >
                     <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#00d4ff' }} />
-                    POWERED BY HYBRID CNN-VIT (CONVNEXTV2 & SWINV2) + YOLO11M
+                    MÔ HÌNH KẾT HỢP CONVNEXTV2 · SWINV2 · YOLO11M
                   </div>
 
                   <h1 className="text-4xl md:text-5xl font-bold mb-4 leading-tight">
@@ -372,17 +376,17 @@ export default function App() {
                   </h1>
 
                   <p className="text-sm md:text-base max-w-2xl mx-auto text-muted leading-relaxed">
-                    Phân tích tự động 15 loại bệnh lý phế quản - phổi, tạo bản đồ nhiệt Grad-CAM Attention Hotspot
-                    và tự động tổng hợp báo cáo y khoa chuyên sâu chuẩn lâm sàng.
+                    Phân tích 14 nhóm bệnh và nhãn không phát hiện bất thường, tạo bản đồ chú ý
+                    và tổng hợp báo cáo để bác sĩ đối chiếu.
                   </p>
 
                   {/* Model Performance Stats */}
-                  <div className="flex items-center justify-center gap-8 mt-8">
+                  <div className="flex flex-wrap items-center justify-center gap-8 mt-8">
                     {[
-                      { value: '94.2%', label: 'Độ chính xác AUROC' },
-                      { value: '< 3.5s', label: 'Thời gian inference GPU' },
-                      { value: '15', label: 'Bệnh lý hô hấp' },
-                      { value: 'Grad-CAM', label: 'Khoanh vùng Hotspot' },
+                      { value: backendStatus === 'online' ? 'Sẵn sàng' : 'Đang chờ', label: 'Kết nối mô hình' },
+                      { value: backendDevice === 'unknown' ? 'Chưa ghi nhận' : backendDevice.toUpperCase(), label: 'Thiết bị xử lý' },
+                      { value: '15', label: 'Nhãn dự đoán' },
+                      { value: 'Grad-CAM', label: 'Bản đồ chú ý' },
                     ].map(({ value, label }) => (
                       <div key={label} className="text-center">
                         <div className="text-xl md:text-2xl font-bold" style={{ color: '#00d4ff', fontFamily: "'JetBrains Mono', monospace" }}>{value}</div>
@@ -438,7 +442,7 @@ export default function App() {
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                         <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12M8 8l4-4 4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                       </svg>
-                      Chọn file từ máy tính
+                      Chọn tệp từ máy tính
                     </div>
 
                     {/* Corner Frame Markers */}
@@ -459,7 +463,7 @@ export default function App() {
                   {/* Preset Sample X-Ray Testing Section */}
                   <div className="mt-8">
                     <div className="text-xs text-center text-muted mb-4 font-mono">
-                      HOẶC CHỌN ẢNH MẪU ĐỂ CHẠY THỬ NHANH:
+                      ẢNH MINH HỌA ĐỂ THỬ GIAO DIỆN:
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       {SAMPLE_XRAYS.map(sample => (
@@ -469,9 +473,9 @@ export default function App() {
                           className="p-4 rounded-xl cursor-pointer transition-all hover:scale-[1.02] glass hover:border-cyan/40 flex items-center gap-3"
                           style={{ border: '1px solid rgba(0, 212, 255, 0.12)' }}
                         >
-                          <img src={sample.dataUrl} alt={sample.title} className="w-12 h-12 rounded-lg object-cover bg-black border border-cyan/20 shrink-0" />
+                          <img src={sample.dataUrl} alt={sample.title.replace(/\s*\([^)]*\)/g, '')} className="w-12 h-12 rounded-lg object-cover bg-black border border-cyan/20 shrink-0" />
                           <div className="overflow-hidden">
-                            <div className="text-xs font-semibold text-text truncate">{sample.title}</div>
+                            <div className="text-xs font-semibold text-text truncate">{sample.title.replace(/\s*\([^)]*\)/g, '')}</div>
                             <div className="text-[11px] text-muted truncate mt-0.5">{sample.subtitle}</div>
                           </div>
                         </div>
@@ -509,7 +513,7 @@ export default function App() {
                       style={{ background: 'radial-gradient(ellipse at center, #0a1a2e 0%, #000 75%)' }}
                     >
                       {previewUrl ? (
-                        <img src={previewUrl} alt="Scanning" className="w-full h-full object-contain opacity-50" />
+                        <img src={previewUrl} alt="Ảnh đang được phân tích" className="w-full h-full object-contain opacity-50" />
                       ) : (
                         <svg width="130" height="130" viewBox="0 0 140 140" fill="none" opacity={0.6}>
                           <path d="M70 20 C70 20 55 25 45 40 C35 55 33 75 35 90 C37 105 50 120 60 115 C65 112 68 105 70 100" stroke="#00d4ff" strokeWidth="2" fill="none" />
@@ -544,14 +548,14 @@ export default function App() {
                       Đang xử lý & Phân tích X-quang...
                     </h2>
                     <p className="text-xs text-muted">
-                      Đang chạy mô hình CheXNet Hybrid CNN-ViT và khoanh vùng Grad-CAM Hotspot
+                      Đang phân tích ảnh và tạo bản đồ vùng chú ý
                     </p>
                   </div>
 
                   {/* Progress Bar */}
                   <div className="mb-5">
                     <div className="flex justify-between text-xs mb-1 font-mono text-muted">
-                      <span>CHEXNET GPU INFERENCE</span>
+                      <span>CHEXNET ĐANG PHÂN TÍCH</span>
                       <span style={{ color: '#00d4ff' }}>
                         {analysisStep < 6 ? `${Math.round((analysisStep / 6) * 98)}%` : '100%'}
                       </span>
@@ -592,7 +596,7 @@ export default function App() {
                         KẾT QUẢ PHÂN TÍCH AI
                       </span>
                       <span className="text-xs text-muted font-mono">
-                        XRAY-ID: #{Math.random().toString(36).substring(2, 8).toUpperCase()}
+                        MÃ ẢNH: #{Math.random().toString(36).substring(2, 8).toUpperCase()}
                       </span>
                     </div>
                     <h2 className="text-2xl font-bold text-text">
@@ -635,8 +639,8 @@ export default function App() {
                         
                         <div className="flex items-center gap-1 bg-black/40 p-1 rounded-lg border border-cyan/10">
                           {[
-                            { id: 'heatmap', label: 'Grad-CAM Attention' },
-                            { id: 'original', label: 'Ảnh gốc DICOM' },
+                            { id: 'heatmap', label: 'Bản đồ chú ý' },
+                            { id: 'original', label: 'Ảnh gốc' },
                           ].map(mode => (
                             <button
                               key={mode.id}
@@ -659,7 +663,7 @@ export default function App() {
                           <div className="relative w-full flex items-center justify-center">
                             <img
                               src={activeHeatmap}
-                              alt="Heatmap"
+                              alt="Bản đồ chú ý"
                               className="max-h-[460px] w-full object-contain heatmap-reveal"
                             />
 
@@ -668,7 +672,7 @@ export default function App() {
                         ) : (
                           <img
                             src={previewUrl}
-                            alt="Original DICOM"
+                            alt="Ảnh X-quang gốc"
                             className="max-h-[460px] w-full object-contain"
                           />
                         )}
@@ -678,7 +682,7 @@ export default function App() {
 
                       {/* Heatmap Color Scale Bar */}
                       <div className="px-4 py-2.5 border-t border-cyan/10 bg-surface/40 flex items-center gap-4 text-xs font-mono text-muted">
-                        <span>GRAD-CAM INTENSITY:</span>
+                        <span>CƯỜNG ĐỘ CHÚ Ý:</span>
                         <div className="flex-1 h-2 rounded-full" style={{ background: 'linear-gradient(90deg, #000080, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)' }} />
                         <span>0.0 → 1.0</span>
                       </div>
@@ -690,7 +694,7 @@ export default function App() {
                         <h4 className="text-xs font-bold text-cyan uppercase tracking-wider font-mono">
                           Đặc điểm hình ảnh học ghi nhận ({activeLabelVN})
                         </h4>
-                        <span className="text-[10px] text-green font-mono">CHUẨN Y KHOA</span>
+                        <span className="text-[10px] text-green font-mono">MÔ TẢ THAM KHẢO</span>
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
                         {activeFindings.map(({ label, val }) => (
@@ -713,13 +717,16 @@ export default function App() {
                           BẢNG PHÂN TÍCH 15 BỆNH LÝ (CHEXNET)
                         </h3>
                         <span className="text-[10px] font-mono text-cyan bg-cyan/10 px-2 py-0.5 rounded border border-cyan/20">
-                          CLICK ĐỂ XEM HEATMAP
+                          CHỌN ĐỂ XEM BẢN ĐỒ CHÚ Ý
                         </span>
                       </div>
 
                       <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1">
                         {allProbabilities && allProbabilities.length > 0 ? (
-                          allProbabilities.map((item) => {
+                          (results?.some(p => p.disease !== 'No Finding')
+                            ? allProbabilities.filter(item => item.disease !== 'No Finding')
+                            : allProbabilities
+                          ).map((item) => {
                             const isSelected = activeDisease === item.disease
                             const probPercent = (item.probability * 100).toFixed(1)
                             const labelInfo = ALL_DISEASE_LABELS.find(d => d.key === item.disease)
@@ -790,7 +797,7 @@ export default function App() {
                           </h3>
                         </div>
                         <span className="text-[10px] font-mono text-muted bg-white/5 px-2 py-0.5 rounded border border-white/10">
-                          CASCADE 2-STAGE
+                          KẾT HỢP HAI GIAI ĐOẠN
                         </span>
                       </div>
 
@@ -810,11 +817,11 @@ export default function App() {
                                 </div>
                               </div>
                               <div className="text-right font-mono">
-                                <div className="text-[10px] text-muted">CASCADE CONF</div>
+                                <div className="text-[10px] text-muted">ĐIỂM KẾT HỢP</div>
                                 <div className="text-sm font-bold" style={{ color: '#00e5a0' }}>
                                   {(det.cascade_score * 100).toFixed(1)}%
                                 </div>
-                                <div className="text-[9px] text-muted">YOLO raw: {(det.confidence * 100).toFixed(0)}%</div>
+                                <div className="text-[9px] text-muted">Điểm YOLO gốc: {(det.confidence * 100).toFixed(0)}%</div>
                               </div>
                             </div>
                           ))}
@@ -883,7 +890,7 @@ export default function App() {
                             <div key={idx} className="p-2.5 rounded-xl border border-cyan/10 bg-surface/50 text-xs">
                               <div className="flex justify-between items-center mb-1">
                                 <span className="font-mono text-cyan">Mã BA: {caseItem.filename}</span>
-                                <span className="text-green font-bold text-[10px]">{caseItem.similarity}% MATCH</span>
+                                <span className="text-green font-bold text-[10px]">{caseItem.similarity}% TƯƠNG ĐỒNG</span>
                               </div>
                               <div className="text-muted truncate">
                                 Bệnh lý: {caseItem.diseases?.join(', ') || 'Không rõ'}
@@ -940,7 +947,7 @@ export default function App() {
               
               {/* FastAPI Backend URL */}
               <div className="space-y-2 pt-4 border-t border-cyan/10">
-                <label className="text-xs font-mono text-cyan">BACKEND FASTAPI URL (LOCAL):</label>
+                <label className="text-xs font-mono text-cyan">ĐỊA CHỈ DỊCH VỤ AI CỤC BỘ:</label>
                 <input
                   type="text"
                   value={backendUrl}
@@ -948,7 +955,7 @@ export default function App() {
                   className="w-full bg-black/40 border border-cyan/20 rounded-xl px-4 py-2.5 text-xs text-text focus:outline-none focus:border-cyan font-mono"
                 />
                 <p className="text-[11px] text-muted">
-                  Địa chỉ Server Python FastAPI inference trên máy cục bộ (Mặc định: http://localhost:8000).
+                  Địa chỉ dịch vụ phân tích ảnh trên máy cục bộ (Mặc định: http://localhost:8000).
                 </p>
               </div>
             </div>
@@ -958,8 +965,8 @@ export default function App() {
 
       {/* ── FOOTER ── */}
       <footer className="mt-16 py-6 border-t border-cyan/10 text-center text-xs font-mono text-muted">
-        <div>CHEXNET PRO AI © 2026 · Integrated Chest X-Ray Medical Diagnostic Platform</div>
-        <div className="text-[10px] opacity-60 mt-1">Hybrid CNN-ViT Model (ConvNeXtV2 + SwinV2) · YOLO11m Lesion Detector · FastAPI · PyTorch</div>
+        <div>CHEXNET PRO AI © 2026 · Hệ thống hỗ trợ phân tích X-quang ngực</div>
+        <div className="text-[10px] opacity-60 mt-1">Mô hình kết hợp CNN–ViT (ConvNeXtV2 + SwinV2) · Bộ định vị YOLO11m · FastAPI · PyTorch</div>
       </footer>
     </div>
   )

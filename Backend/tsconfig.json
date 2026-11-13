@@ -1,0 +1,27 @@
+{
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "commonjs",
+        "lib": ["ESNext"],
+        "outDir": "./dist",
+        "rootDir": "./src",
+        "strict": true,
+        "types": ["node"],
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "resolveJsonModule": true,
+        "declaration": true,
+        "experimentalDecorators": true,
+        "emitDecoratorMetadata": true,
+        "baseUrl": ".",
+        "paths": {
+            "@modules/*": ["src/modules/*"],
+            "@common/*": ["src/common/*"],
+            "@config/*": ["src/common/config/*"],
+            "@socket/*": ["src/socket/*"],
+            "@worker/*": ["src/worker/*"]
+        }
+    },
+    "include": ["src/**/*"],
+    "exclude": ["node_modules", "dist"]
+}

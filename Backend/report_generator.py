@@ -223,15 +223,19 @@ class ClinicalReportGenerator:
                 
             uncertainty_note = f"± {uncert*100:.0f}%" if uncert <= 0.12 else f"⚠️ Không chắc chắn (± {uncert*100:.0f}%)"
             
+            disease_en = disease.replace('_', ' ')
+            disease_vi = DISEASE_NAMES_VI.get(disease, disease)
+            disease_bilingual = f"{disease_vi} ({disease_en})" if disease_vi != disease_en else disease_vi
+
             if uncert > 0.12:
-                warnings_list.append(f"Dự đoán {DISEASE_NAMES_VI.get(disease, disease)} có độ bất định cao ({uncert*100:.0f}%).")
+                warnings_list.append(f"Dự đoán {disease_bilingual} có độ bất định cao ({uncert*100:.0f}%).")
                 
             if disease in critical_diseases and prob > 0.3:
-                warnings_list.append(f"CẢNH BÁO: Phát hiện {DISEASE_NAMES_VI.get(disease, disease)} (Xác suất {prob*100:.1f}%). Cần chú ý lâm sàng!")
+                warnings_list.append(f"CẢNH BÁO: Phát hiện {disease_bilingual} (Xác suất {prob*100:.1f}%). Cần chú ý lâm sàng!")
                 
             finding_obj = {
                 'disease': disease,
-                'disease_vi': DISEASE_NAMES_VI.get(disease, disease),
+                'disease_vi': disease_vi,
                 'probability': prob,
                 'confidence_level': self._get_confidence_level_vi(conf),
                 'uncertainty_note': uncertainty_note,
@@ -249,7 +253,13 @@ class ClinicalReportGenerator:
         else:
             severe_levels = {'severe': 3, 'moderate': 2, 'mild': 1}
             worst_finding = max(findings_list, key=lambda x: severe_levels.get(x['severity'], 0))
-            summary = f"Phát hiện {num_findings} bất thường. Đáng chú ý nhất là {worst_finding['disease_vi']} ở mức độ {worst_finding['severity_vi'].lower()}."
+            worst_en = worst_finding['disease'].replace('_', ' ')
+            worst_bilingual = (
+                f"{worst_finding['disease_vi']} ({worst_en})"
+                if worst_finding['disease_vi'] != worst_en
+                else worst_finding['disease_vi']
+            )
+            summary = f"Phát hiện {num_findings} bất thường. Đáng chú ý nhất là {worst_bilingual} ở mức độ {worst_finding['severity_vi'].lower()}."
             
         co_occurrence_notes = []
         for co in co_occurrences:
