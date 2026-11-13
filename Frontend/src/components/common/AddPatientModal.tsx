@@ -4,7 +4,6 @@ import { useNavigate } from 'react-router-dom';
 import { message, Modal, Spin } from 'antd';
 import { useCreatePatientMutation, useUploadScanMutation } from '../../stores/baseApi';
 import { formatAiModelLabel } from '../../utils/aiModel';
-import { scanTypeLabel } from '../../utils/display';
 
 interface AddPatientModalProps {
   isOpen: boolean;
@@ -13,7 +12,7 @@ interface AddPatientModalProps {
 
 type StepType = 1 | 2 | 3;
 
-import { CHEST_XRAY_SCAN_TYPES, DEFAULT_CHEST_SCAN_TYPE, CHEST_XRAY_SCOPE_NOTE } from '../../constants/chestXray';
+import { DEFAULT_CHEST_SCAN_TYPE } from '../../constants/chestXray';
 
 export const AddPatientModal: React.FC<AddPatientModalProps> = ({ isOpen, onClose }) => {
   const navigate = useNavigate();
@@ -44,7 +43,6 @@ export const AddPatientModal: React.FC<AddPatientModalProps> = ({ isOpen, onClos
   const [newPatient, setNewPatient] = useState<any>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [scanType, setScanType] = useState(DEFAULT_CHEST_SCAN_TYPE);
   const [isDragging, setIsDragging] = useState(false);
 
   // ── Step 3: Progressive AI Status State ─────────────────────────────────────
@@ -69,7 +67,6 @@ export const AddPatientModal: React.FC<AddPatientModalProps> = ({ isOpen, onClos
         URL.revokeObjectURL(previewUrl);
         setPreviewUrl(null);
       }
-      setScanType(DEFAULT_CHEST_SCAN_TYPE);
       setShowVitals(false);
       setHeartRate('');
       setBloodPressure('');
@@ -178,7 +175,7 @@ export const AddPatientModal: React.FC<AddPatientModalProps> = ({ isOpen, onClos
 
       const result = await uploadScan({
         patientId: newPatient.patientCode,
-        scanType,
+        scanType: DEFAULT_CHEST_SCAN_TYPE,
         imageFile: selectedFile,
       }).unwrap();
 
@@ -468,33 +465,6 @@ export const AddPatientModal: React.FC<AddPatientModalProps> = ({ isOpen, onClos
           {/* STEP 2: SCAN FILE UPLOAD */}
           {step === 2 && (
             <div className="flex flex-col gap-6">
-              
-              {/* Scan Type Selection */}
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-primary dark:text-blue-400 mb-2.5 flex items-center gap-1">
-                  <span aria-hidden="true" className="material-symbols-outlined text-[16px]">settings_accessibility</span>
-                  Tư thế chụp X-quang ngực
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  <p className="text-[11px] text-on-surface-variant dark:text-gray-400 mb-2 m-0">
-                    {CHEST_XRAY_SCOPE_NOTE}
-                  </p>
-                  {CHEST_XRAY_SCAN_TYPES.map((type) => (
-                    <button
-                      key={type}
-                      onClick={() => setScanType(type)}
-                      className={`px-4 py-2 rounded-lg text-xs font-semibold border transition-all ${
-                        scanType === type
-                          ? 'bg-primary text-white border-primary shadow-sm'
-                          : 'bg-background dark:bg-[#1a1d27] text-on-surface-variant dark:text-gray-400 border-outline-variant/60 dark:border-gray-700 hover:border-primary/50'
-                      }`}
-                    >
-                      {scanTypeLabel(type)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               {/* Drag and Drop Zone */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-primary dark:text-blue-400 mb-2.5 flex items-center gap-1">

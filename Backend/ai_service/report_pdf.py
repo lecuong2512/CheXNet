@@ -62,8 +62,13 @@ def render_report(data: dict) -> bytes:
         for finding in classification["findings"]:
             score = f"{finding['probability'] * 100:.1f}".replace(".", ",")
             threshold = f"{finding['threshold'] * 100:.1f}".replace(".", ",")
-            paragraph(f"{finding['label']}: {score}% · Ngưỡng {threshold}%")
-        for warning in classification["warnings"]:
+            en_name = str(finding.get("disease") or "").replace("_", " ")
+            en_suffix = f" ({en_name})" if en_name and en_name != finding["label"] else ""
+            paragraph(f"{finding['label']}: {score}%{en_suffix} · Ngưỡng {threshold}%")
+        warnings = classification["warnings"]
+        if classification.get("findings"):
+            warnings = [w for w in warnings if "không phát hiện bất thường" not in w]
+        for warning in warnings:
             paragraph(warning)
         if classification["withoutHeatmap"]:
             paragraph("Mô tả dưới đây chỉ thuộc các nhãn có bản đồ chú ý, không thay thế danh sách đầy đủ phía trên.")

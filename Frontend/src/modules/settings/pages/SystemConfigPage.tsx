@@ -16,9 +16,9 @@ export default function SystemConfigPage() {
                 <Tag color={ready ? 'green' : 'orange'}>{ready ? 'Sẵn sàng phân tích' : 'Đang chờ mô hình và bộ xác thực'}</Tag>}
             {data && <Descriptions bordered column={1} size="small">
                 <Descriptions.Item label="Thời điểm kiểm tra">{new Date(data.checkedAt).toLocaleString('vi-VN')}</Descriptions.Item>
-                <Descriptions.Item label="Mô hình phân tích">{data.modelLoaded ? 'Đã nạp' : 'Chưa nạp'} · {formatAiModelLabel(data.modelVersion)}</Descriptions.Item>
+                <Descriptions.Item label="Mô hình phân tích">{data.modelLoaded ? 'Đã nạp' : 'Chưa nạp'} · {formatAiModelLabel(data.modelVersion)}{data.model_file ? ` (${data.model_file})` : ''}</Descriptions.Item>
                 <Descriptions.Item label="Thiết bị">{deviceLabel(data.device)}</Descriptions.Item>
-                <Descriptions.Item label="Bộ định vị bổ sung (YOLO)">{data.yolo_loaded ? 'Đã nạp' : 'Chưa nạp trọng số'}</Descriptions.Item>
+                <Descriptions.Item label="Bộ định vị bổ sung (YOLO)">{data.yolo_loaded ? 'Đã nạp (YOLO11m)' : 'Chưa nạp trọng số'}</Descriptions.Item>
                 <Descriptions.Item label="Bộ xác thực X-quang">{data.imageValidation?.enabled ? data.imageValidation.loaded ? 'Sẵn sàng' : 'Chưa sẵn sàng' : 'Đang tắt'}</Descriptions.Item>
                 <Descriptions.Item label="Suy luận đang chạy">{data.inference?.active ?? 'Chưa ghi nhận'}</Descriptions.Item>
                 <Descriptions.Item label="Yêu cầu đang chờ">{data.inference?.waiting ?? 'Chưa ghi nhận'}</Descriptions.Item>

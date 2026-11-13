@@ -17,15 +17,16 @@ export const getScanPreview = catchAsync(async (req: Request, res: Response) => 
     const scan = await ScanModel.findOne({ _id: id, status: ScanStatus.DONE });
     if (!scan) throw new ApiError(404, 'Không tìm thấy lần chụp');
     const preview = path.resolve(scan.previewPath || scan.imagePath);
-    const roots = [PRIVATE_UPLOAD_DIR, UPLOAD_DIR].map(root => path.resolve(root) + path.sep);
-    if (!roots.some(root => preview.startsWith(root)) || !fs.existsSync(preview)) {
+    const roots = [PRIVATE_UPLOAD_DIR, UPLOAD_DIR].map(root => path.resolve(root));
+    const matchedRoot = roots.find(root => preview.startsWith(root + path.sep));
+    if (!matchedRoot || !fs.existsSync(preview)) {
         throw new ApiError(404, 'Không tìm thấy ảnh xem lại');
     }
     if (!scan.previewPath && /\.(dcm|dicom)$/i.test(preview)) {
         throw new ApiError(422, 'Lần chụp cũ chưa có bản xem DICOM');
     }
     res.setHeader('Cache-Control', 'private, no-store');
-    res.sendFile(preview);
+    res.sendFile(path.relative(matchedRoot, preview), { root: matchedRoot });
 });
 
 export const uploadScan = catchAsync(async (req: Request, res: Response) => {

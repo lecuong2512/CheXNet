@@ -14,8 +14,8 @@ import {
 import { formatAiModelLabel } from '../../../utils/aiModel';
 import HybridAnalysisPanel from '../../../components/common/HybridAnalysisPanel';
 
-// ── Scan type options (matches backend ScanType enum) ────────────────────────
-import { CHEST_XRAY_SCAN_TYPES, DEFAULT_CHEST_SCAN_TYPE, CHEST_XRAY_SCOPE_NOTE } from '../../../constants/chestXray';
+// ── Default chest X-ray scan type (matches backend ScanType enum) ───────────────
+import { DEFAULT_CHEST_SCAN_TYPE } from '../../../constants/chestXray';
 
 // ── Upload status type ────────────────────────────────────────────────────────
 type UploadStep = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error';
@@ -56,7 +56,6 @@ const PatientProfilePage: React.FC = () => {
     const [isDragging, setIsDragging] = useState(false);
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-    const [scanType, setScanType] = useState(DEFAULT_CHEST_SCAN_TYPE);
     const [uploadStep, setUploadStep] = useState<UploadStep>('idle');
     const [uploadError, setUploadError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -112,7 +111,6 @@ const PatientProfilePage: React.FC = () => {
         setShowUploadModal(false);
         setSelectedFile(null);
         setPreviewUrl(null);
-        setScanType(DEFAULT_CHEST_SCAN_TYPE);
         setUploadStep('idle');
         setUploadError(null);
     };
@@ -132,7 +130,7 @@ const PatientProfilePage: React.FC = () => {
 
             const result = await uploadScan({
                 patientId,
-                scanType,
+                scanType: DEFAULT_CHEST_SCAN_TYPE,
                 imageFile: selectedFile,
             }).unwrap();
 
@@ -188,11 +186,10 @@ const PatientProfilePage: React.FC = () => {
                                 </div>
                                 <div>
                                     <h3 className="text-body-lg font-semibold text-on-surface dark:text-white m-0">Tải X-quang ngực</h3>
-                                    <p className="text-xs text-on-surface-variant dark:text-gray-400 m-0 mt-0.5">{CHEST_XRAY_SCOPE_NOTE}</p>
                                     <p className="text-xs text-on-surface-variant dark:text-gray-400 m-0">Bệnh nhân: {patient.name} · {patientId}</p>
                                 </div>
                             </div>
-                            <button aria-label="Đóng cửa sổ tải ảnh" onClick={closeModal} disabled={uploadStep === 'uploading' || uploadStep === 'analyzing'}
+                            <button type="button" aria-label="Đóng cửa sổ tải ảnh" onClick={closeModal} disabled={uploadStep === 'uploading' || uploadStep === 'analyzing'}
                                 className="p-1.5 rounded-full hover:bg-surface-container-high transition-colors disabled:opacity-40">
                                 <span aria-hidden="true" className="material-symbols-outlined text-[22px] text-on-surface-variant">close</span>
                             </button>
@@ -200,26 +197,6 @@ const PatientProfilePage: React.FC = () => {
 
                         {/* Modal Body */}
                         <div className="p-5 flex flex-col gap-5 overflow-y-auto">
-                            {/* Scan Type Selector */}
-                            <div>
-                                <label className="block text-label-sm font-semibold text-on-surface dark:text-gray-200 mb-2">
-                                    Loại phim chụp
-                                </label>
-                                <div className="flex flex-wrap gap-2">
-                                    {CHEST_XRAY_SCAN_TYPES.map((type) => (
-                                        <button key={type}
-                                            onClick={() => setScanType(type)}
-                                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                                                scanType === type
-                                                    ? 'bg-primary text-white border-primary shadow-sm'
-                                                    : 'bg-background dark:bg-[#1a1d27] text-on-surface-variant dark:text-gray-400 border-outline-variant/40 hover:border-primary/50'
-                                            }`}
-                                        >
-                                            {scanTypeLabel(type)}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
 
                             {/* Drag & Drop Zone */}
                             <div

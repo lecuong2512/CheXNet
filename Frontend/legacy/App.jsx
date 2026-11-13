@@ -723,7 +723,10 @@ export default function App() {
 
                       <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1">
                         {allProbabilities && allProbabilities.length > 0 ? (
-                          allProbabilities.map((item) => {
+                          (results?.some(p => p.disease !== 'No Finding')
+                            ? allProbabilities.filter(item => item.disease !== 'No Finding')
+                            : allProbabilities
+                          ).map((item) => {
                             const isSelected = activeDisease === item.disease
                             const probPercent = (item.probability * 100).toFixed(1)
                             const labelInfo = ALL_DISEASE_LABELS.find(d => d.key === item.disease)

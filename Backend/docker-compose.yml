@@ -1,22 +1,20 @@
-version: '3.8'
-
 services:
-  # # ── MongoDB Database ────────────────────────────────────────────────────────
-  # mongodb:
-  #   image: mongo:7.0
-  #   container_name: chexnet-mongodb
-  #   restart: always
-  #   ports:
-  #     - '27017:27017'
-  #   volumes:
-  #     - mongodb_data:/data/db
-  #   networks:
-  #     - chexnet_network
-  #   healthcheck:
-  #     test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
+  # ── MongoDB Database ────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: chexnet-mongodb
+    restart: always
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - chexnet_network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── Redis Cache & PubSub ───────────────────────────────────────────────────
   redis:
@@ -76,22 +74,22 @@ services:
       - ./uploads:/app/uploads
       - ./logs:/app/logs
     environment:
-      - PORT=3000
-      - NODE_ENV=production
-      - MONGODB_URI=mongodb://mongodb:27017/chexnet_v3
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=""
-      - REDIS_PREFIX="chexnet::"
-      - JWT_PRIVATE_KEY="chexnet-v3-super-secret-jwt-key-2024"
-      - JWT_EXPIRES_IN="15m"
-      - JWT_REFRESH_EXPIRES_IN="7d"
-      - CRYPTO_SECRET="chexnet-v3-aes-256-crypto-secret-key"
-      - AI_SERVICE_URL="http://chexnet-ai:8000"
-      - UPLOAD_DIR="./uploads"
-      - MAX_FILE_SIZE_MB="10"
-      - ALLOWED_ORIGINS="http://localhost:5173"
-      - LOG_LEVEL="info"
+      PORT: "3000"
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongodb:27017/chexnet_v3
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      REDIS_PREFIX: "chexnet::"
+      JWT_PRIVATE_KEY: chexnet-v3-super-secret-jwt-key-2024
+      JWT_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      CRYPTO_SECRET: chexnet-v3-aes-256-crypto-secret-key
+      AI_SERVICE_URL: http://chexnet-ai:8000
+      UPLOAD_DIR: ./uploads
+      MAX_FILE_SIZE_MB: "10"
+      ALLOWED_ORIGINS: http://localhost:5173
+      LOG_LEVEL: info
     networks:
       - chexnet_network
     healthcheck:

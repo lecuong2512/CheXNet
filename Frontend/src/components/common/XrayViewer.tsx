@@ -62,7 +62,7 @@ export default function XrayViewer({ originalImage, attentionImage, disease, det
     </ol>}
     {view === 'yolo' && size && hasDetections && boxes.length === 0 && <p role="note" className="text-xs text-secondary">Không có tọa độ khung hợp lệ trong phạm vi ảnh này.</p>}
     {!hasDetections && <p className="text-xs text-secondary dark:text-gray-400" role="note">
-      {detectorStatus === 'unavailable' ? 'Chưa nạp mô hình định vị YOLO cho lần chụp này nên chưa có khung bao.' : detectorStatus === 'loaded-unconfirmed' ? 'Chưa có vùng định vị YOLO sau bước lọc. Điều này không xác nhận ảnh bình thường.' : 'Lần chụp này chưa ghi nhận khung định vị YOLO.'}
+      {detectorStatus === 'unavailable' ? 'Chưa nạp mô hình định vị YOLO11m cho lần chụp này nên chưa có khung bao.' : detectorStatus === 'loaded-unconfirmed' ? 'Đã nạp và chạy mô hình YOLO11m, nhưng chưa phát hiện vùng tổn thương khu trú vượt ngưỡng trên ảnh này (YOLO hỗ trợ 14 lớp VinDr). Điều này không xác nhận ảnh bình thường.' : 'Lần chụp này chưa ghi nhận khung định vị YOLO.'}
     </p>}
   </div>;
 }

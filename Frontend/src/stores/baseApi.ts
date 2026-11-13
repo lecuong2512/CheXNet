@@ -1,7 +1,7 @@
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react';
 import type { BaseQueryFn, FetchArgs, FetchBaseQueryError } from '@reduxjs/toolkit/query';
 import { logout } from './authSlice';
-import { DISEASE_LABELS } from '../utils/display';
+import { diseaseLabel } from '../utils/display';
 import { message } from 'antd';
 
 // ── Backend Connection ────────────────────────────────────────────────────────
@@ -47,9 +47,8 @@ async function waitForScanDiagnosis(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// HELPER: Vietnamese Class Name Translation (15 labels ConvNeXtV2-Large)
+// HELPER: Bilingual Class Name Formatting (Vietnamese + English)
 // ══════════════════════════════════════════════════════════════════════════════
-const classNameViMap = DISEASE_LABELS;
 
 const diagStatusToVi: Record<string, string> = {
     pending: 'Đang chờ',
@@ -90,8 +89,14 @@ const mapScanWithDiagnosis = (scan: any, diagnosis: any): any => {
     const { date, time } = formatDateVi(scan.createdAt);
     const hybridAnalysis = diagnosis?.hybridAnalysis;
     const classification = diagnosis?.inferenceMeta?.classification;
-    const detectedPredictions = (classification?.findings ?? hybridAnalysis?.predictions)?.map((p: any) => ({
-        name: classNameViMap[p.disease] || p.disease,
+    const rawFindings = classification?.findings ?? (() => {
+        const preds = hybridAnalysis?.predictions;
+        if (!Array.isArray(preds)) return preds;
+        const hasPathology = preds.some((p: any) => p.disease !== 'No Finding');
+        return hasPathology ? preds.filter((p: any) => p.disease !== 'No Finding') : preds;
+    })();
+    const detectedPredictions = rawFindings?.map((p: any) => ({
+        name: diseaseLabel(p.disease),
         probability: Math.round(p.probability * 100),
         status: 'warning',
     }));

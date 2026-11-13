@@ -15,7 +15,16 @@ export default function HybridAnalysisPanel({ analysis, inferenceMeta, originalI
   const { currentData: linkedCases, isFetching: loadingCases } = useGetSimilarCasesQuery(diagnosisId || '', { skip: !diagnosisId || !analysis });
   if (!analysis) return <section className="ui-card space-y-4"><h2 className="section-title">Ảnh X-quang</h2>
     <XrayViewer originalImage={originalImage} /><p>Chưa có dữ liệu phân tích chi tiết cho lần chụp này.</p></section>;
-  const selected = analysis.predictions.find(p => p.disease === selectedDisease) ?? analysis.predictions[0];
+  const hasPathologyFindings = inferenceMeta?.classification
+    ? inferenceMeta.classification.findings.length > 0
+    : analysis.predictions.some(p => p.disease !== 'No Finding');
+  const selectablePredictions = hasPathologyFindings
+    ? analysis.predictions.filter(p => p.disease !== 'No Finding')
+    : analysis.predictions;
+  const displayedProbabilities = hasPathologyFindings
+    ? analysis.all_probabilities.filter(p => p.disease !== 'No Finding')
+    : analysis.all_probabilities;
+  const selected = selectablePredictions.find(p => p.disease === selectedDisease) ?? selectablePredictions[0];
   const report = analysis.clinical_report;
   const similar = linkedCases || analysis.similar_cases;
   return <section className="ui-card analysis-panel">
@@ -24,7 +33,7 @@ export default function HybridAnalysisPanel({ analysis, inferenceMeta, originalI
       { key: 'attention', label: 'Ảnh X-quang', children: <div className="space-y-4">
         {selected && <label className="field-label">Dấu hiệu xem bản đồ chú ý
           <Select aria-label="Chọn dấu hiệu xem bản đồ chú ý" className="w-full" value={selected.disease} onChange={setSelectedDisease}
-            options={analysis.predictions.map(p => ({ value: p.disease, label: `${diseaseLabel(p.disease)} · ${formatPercent(p.probability)}` }))} /></label>}
+            options={selectablePredictions.map(p => ({ value: p.disease, label: `${diseaseLabel(p.disease)} · ${formatPercent(p.probability)}` }))} /></label>}
         <XrayViewer originalImage={originalImage} attentionImage={selected?.heatmap} disease={selected && diseaseLabel(selected.disease)}
           detections={analysis.yolo_detections} detectorStatus={inferenceMeta?.detectorStatus} />
         {selected && <div className="rounded-lg bg-slate-50 dark:bg-slate-800 p-3 text-sm leading-relaxed">
@@ -40,20 +49,20 @@ export default function HybridAnalysisPanel({ analysis, inferenceMeta, originalI
               {selected.uncertainty != null && <div><dt>Độ bất định mô hình cung cấp</dt><dd>{formatNumber(selected.uncertainty, 4)}</dd></div>}
             </dl> : <p>Không có nhãn bệnh vượt ngưỡng hiển thị.</p>}
             {report.findings.filter(f => f.disease === selected?.disease).map(f => <p key={f.disease}>{diseaseLabel(f.disease)}{f.severity_vi ? ` · Mức độ ${f.severity_vi.toLowerCase()}` : ''}</p>)}
-            <h3 className="font-semibold">Bộ định vị bổ sung (YOLO)</h3>
+            <h3 className="font-semibold">Bộ định vị bổ sung (YOLO11m)</h3>
             {analysis.yolo_detections.length ? analysis.yolo_detections.map((d, i) => <div key={i}>
               <p>{diseaseLabel(d.disease)} · Điểm định vị {formatPercent(d.confidence)} · Điểm kết hợp {formatPercent(d.cascade_score)}</p>
               {d.vindr_class && <p>Lớp dữ liệu VinDr: {diseaseLabel(d.vindr_class)}</p>}
               {d.bbox && <p>Tọa độ vùng: [{d.bbox.x1}, {d.bbox.y1}, {d.bbox.x2}, {d.bbox.y2}]</p>}
-            </div>) : <p>{inferenceMeta?.detectorStatus === 'unavailable' ? 'Chưa nạp trọng số YOLO cho lần phân tích này.' : inferenceMeta?.detectorStatus === 'loaded-unconfirmed' ? 'Đã nạp YOLO, chưa xác nhận được kết quả định vị.' : 'Chưa ghi nhận trạng thái bộ định vị cho lần chụp này.'}</p>}
+            </div>) : <p>{inferenceMeta?.detectorStatus === 'unavailable' ? 'Chưa nạp trọng số YOLO11m cho lần phân tích này.' : inferenceMeta?.detectorStatus === 'loaded-unconfirmed' ? 'Đã nạp YOLO11m và đã quét ảnh, nhưng không phát hiện vùng tổn thương khu trú vượt ngưỡng (YOLO hỗ trợ 14 lớp VinDr).' : 'Chưa ghi nhận trạng thái bộ định vị cho lần chụp này.'}</p>}
             <a href="/legacy.html" target="_blank" rel="noreferrer" className="text-primary underline">Mở công cụ nghiên cứu nâng cao ↗</a>
           </div>
         </details>
       </div> },
       { key: 'probabilities', label: 'Điểm AI', children: <div className="space-y-4">
-        <p className="text-sm text-secondary dark:text-gray-400">Đầy đủ 15 nhãn của mô hình. Mỗi điểm thể hiện mức dự đoán cho một nhãn; các điểm không cộng thành 100%.</p>
+        <p className="text-sm text-secondary dark:text-gray-400">{hasPathologyFindings ? `Hiển thị ${displayedProbabilities.length}/15 nhãn bệnh (đã ẩn nhãn Không phát hiện bất thường vì ảnh có bệnh vượt ngưỡng). Mỗi điểm thể hiện mức dự đoán cho một nhãn; các điểm không cộng thành 100%.` : 'Đầy đủ 15 nhãn của mô hình. Mỗi điểm thể hiện mức dự đoán cho một nhãn; các điểm không cộng thành 100%.'}</p>
         <ClassificationDetails classification={inferenceMeta?.classification} />
-        <div className="grid gap-4 sm:grid-cols-2">{analysis.all_probabilities.map(p => <div key={p.disease}>
+        <div className="grid gap-4 sm:grid-cols-2">{displayedProbabilities.map(p => <div key={p.disease}>
           <div className="flex justify-between gap-3 text-sm"><span>{diseaseLabel(p.disease)}</span><strong>{formatPercent(p.probability)}</strong></div>
           <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded mt-2 overflow-hidden" role="meter" aria-label={diseaseLabel(p.disease)} aria-valuemin={0} aria-valuemax={100} aria-valuenow={p.probability * 100}>
             <div className="h-full bg-blue-600 rounded" style={{ width: `${p.probability * 100}%` }} /></div>

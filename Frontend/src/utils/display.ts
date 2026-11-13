@@ -19,7 +19,15 @@ const DETECTOR_LABELS: Record<string, string> = {
   'pleural thickening': DISEASE_LABELS.Pleural_Thickening,
   'pulmonary fibrosis': DISEASE_LABELS.Fibrosis,
 };
-export const diseaseLabel = (value: string) => DISEASE_LABELS[value] || DETECTOR_LABELS[value.replaceAll('_', ' ').toLowerCase()] || value;
+const formatBilingual = (vi: string | undefined, raw: string) => {
+  const en = raw.replaceAll('_', ' ');
+  if (!vi) return en;
+  return vi.toLowerCase() === en.toLowerCase() ? vi : `${vi} (${en})`;
+};
+export const diseaseLabel = (value: string) => {
+  const vi = DISEASE_LABELS[value] || DETECTOR_LABELS[value.replaceAll('_', ' ').toLowerCase()];
+  return formatBilingual(vi, value);
+};
 export const formatNumber = (value: number, digits = 1) =>
   new Intl.NumberFormat('vi-VN', { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
 export const formatPercent = (value: number) => `${formatNumber(value * 100)}%`;
