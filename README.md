@@ -119,6 +119,8 @@ Tổng hợp từ 2 nguồn `NIH ChestX-ray 14` và `VinDr-CXR` (`166,226` dòng
 
 *(5 lớp `No Finding`, `Pneumonia`, `Edema`, `Emphysema`, `Hernia` có `0` GT Bounding Box trong bộ dữ liệu kết hợp — nguồn: [`Results/Comparison/dataset_balance_audit.csv`](Results/Comparison/dataset_balance_audit.csv)).*
 
+![Phân phối mất cân bằng lớp và mật độ GT Bounding Box](Results/Comparison/dataset_imbalance_and_bboxes.png)
+
 ### A. Huấn Luyện Mô Hình Hybrid (`Models/TrainModel.py`)
 
 - **Đọc & Augmentation (`Models/read_data.py`)**: Cache byte nén thô trong RAM (`bytes_cache`), gộp nhãn bác sĩ VinDr bằng phép `OR`, biến đổi hình học đồng bộ tensor 18 kênh (`3 ảnh + 15 mặt nạ`).
@@ -224,7 +226,7 @@ CheXNet/
 
 ### 1. Thông Số Phần Cứng `Base` vs `Large` (`Results/Comparison/base_vs_large_hardware.csv`)
 
-Đo thực nghiệm bằng `compare_models.py` qua `torch.cuda.max_memory_allocated()`:
+Đo thực nghiệm bằng [`compare_models.py`](compare_models.py) qua `torch.cuda.max_memory_allocated()`:
 
 | Mô hình | Tổng tham số | Latency (`BS=1`) | Throughput (`BS=1`) | Peak VRAM (`BS=1`) | Peak VRAM (`BS=4`) |
 |:---|---:|---:|---:|---:|---:|
@@ -232,6 +234,8 @@ CheXNet/
 | **Hybrid Large (`384px`)** | `279,118,207` | `62.54 ms/ảnh` | `15.99 img/s` | `1,674.1 MB` | `1,775.4 MB` |
 
 *(Ghi chú: Giá trị `1.21 GB` từng nêu trong ghi chú tối ưu nạp checkpoint cũ chỉ là lượng bộ nhớ cấp phát cho trọng số hai mô hình khi vừa chuyển sang GPU, **không** phải Peak VRAM trong lúc suy luận.)*
+
+![So sánh thông số phần cứng và hiệu năng suy luận Base vs Large trên RTX 3050](Results/Comparison/base_vs_large_benchmark.png)
 
 ### 2. Trạng Thái Các Checkpoint Hiện Có Trong `Trainedmodel/`
 
@@ -243,7 +247,9 @@ CheXNet/
 
 ### 3. Kết Quả Đánh Giá Chẩn Đoán & Thử Nghiệm Ngoại Bộ
 
-- **Bảng AUROC Test 15 lớp (`Results/Comparison/large_per_class_diagnostics.csv`, Mean AUROC = `0.8693`)**:
+#### 3.1. Phân Tích Chẩn Đoán Theo Từng Nhãn Bệnh (`Hybrid Large` — `Results/Comparison/`)
+
+Bảng dưới tổng hợp kết quả benchmark 15 lớp từ [`Results/Comparison/large_per_class_diagnostics.csv`](Results/Comparison/large_per_class_diagnostics.csv) (trung bình cộng 15 lớp `Mean AUROC = 0.8693`):
 
 | Nhãn bệnh | AUROC Test | Tỉ lệ dương tập Train (%) | Tổng GT BBox (VinDr) |
 |:---|---:|---:|---:|
@@ -263,14 +269,160 @@ CheXNet/
 | `Pleural_Thickening` | `0.8781` | `4.25%` | `4,838` |
 | `Hernia` | `0.9583` | `0.18%` | `0` |
 
-- **Kiểm thử ngoại bộ trên 200 ảnh X-quang nhi khoa (`probml/chest_xray_kaggle`: `100 NORMAL` / `100 PNEUMONIA`, ngưỡng `0.5`)**:
-  - Trước & sau khi nối YOLO (`docs/danh-gia-200-anh-2026-11-08.md`, `docs/kiem-thu-lai-yolo-2026-11-09.md`): Accuracy `52.00%` (`104/200`), Sensitivity cho `Pneumonia` `4.00%` (`4/100`), Specificity `100.00%`, F1 `0.0769`, AUROC phân biệt `0.8819`. Bật YOLO cho `200/200` lượt thành công, xuất `76` khung trên `50/200` ảnh (chỉ mang tính quan sát định tính vì bộ ảnh không có GT box và `yolov11m.pt` không có lớp `Pneumonia`).
-- **Ảnh mẫu [`Results/EX/Cardiomegally.png`](Results/EX/Cardiomegally.png) (`1060 × 960 px`, `828,344 bytes`)**:
-  - Khi thử nghiệm trên `/v3/predict` cùng `yolov11m.pt`: bản ghi `docs/noi-yolo-2026-11-09.md` (với `hybrid_model.pth`) ghi nhận `6` khung Cascade (`Cardiomegaly [326, 550, 941, 831]` YOLO `65.54%` / Cascade `54.51%`, kèm `Aortic enlargement`, `Calcification`, 3× `Pleural effusion`).
+![Biểu đồ AUROC từng lớp và chuẩn L2 trọng số phân loại mô hình Large](Results/Comparison/large_auroc_vs_imbalance.png)
+
+*(Ghi chú minh bạch: Trong biểu đồ [`Results/Comparison/large_auroc_vs_imbalance.png`](Results/Comparison/large_auroc_vs_imbalance.png), `compare_models.py` gắn cứng đường nét đứt `0.8651` và tiêu đề `Stage 2 Epoch 13`, trong khi trung bình 15 giá trị `Test_AUROC` của bảng `large_per_class_diagnostics.csv` là `0.8693`; Panel B cho thấy lớp hiếm `Hernia` (`0.18%` mẫu dương) có chuẩn L2 trọng số phân loại cao nhất ở mức `0.517`.)*
+
+---
+
+#### 3.2. So Sánh Hai Bộ Kiểm Thử: `NIH Thuần` (`22,433` ảnh) vs `Hybrid NIH+VinDr` (`12,427` ảnh)
+
+Repository lưu giữ đầy đủ 2 bộ biểu đồ đánh giá hoàn chỉnh gồm **8 biểu đồ mỗi bộ** tại [`Results/NIH/`](Results/NIH/) và [`Results/Hybrid/`](Results/Hybrid/). Khi gộp thêm nguồn VinDr-CXR vào tập kiểm thử Hybrid, phân bố nhãn thay đổi mạnh: các bệnh lý có mật độ GT BBox cao trên VinDr (`Cardiomegaly`, `Fibrosis`, `Pleural_Thickening`) tăng mạnh **PR-AUC**, trong khi các nhãn ít gặp hoặc phân tán theo phân phối nguồn (`Pneumonia`, `Pneumothorax`, `Edema`) sụt giảm PR-AUC và làm AUROC trung bình giảm nhẹ từ `0.8895` xuống `0.8758`.
+
+| Tiêu chí so sánh | Bộ kiểm thử `NIH Thuần` (`Results/NIH/`) | Bộ kiểm thử `Hybrid NIH + VinDr-CXR` (`Results/Hybrid/`) | Chênh lệch (`Hybrid − NIH`) |
+|:---|---:|---:|---:|
+| **Số ảnh Test (số cặp ảnh × 15 lớp)** | `22,433` (`336,495`) | `12,427` (`186,405`) | `-10,006` ảnh |
+| **Mean AUROC (15 lớp)** | `0.8895` | `0.8758` | `-0.0137` |
+| **Mean PR-AUC (15 lớp)** | `0.4451` | `0.4211` | `-0.0240` |
+| **Ngưỡng tối ưu Macro-F1** | `0.65` | `0.65` | `0.00` |
+| **Ma trận nhầm lẫn tổng (`TN / FP / FN / TP`)** | `238,202 / 69,823 / 2,007 / 26,463` | `134,882 / 35,753 / 1,458 / 14,312` | Tổng hợp `15` lớp |
+
+<details>
+<summary><strong>Xem bảng đối chiếu chi tiết AUROC &amp; PR-AUC cho toàn bộ 15 lớp giữa bộ NIH và bộ Hybrid</strong></summary>
+
+| Nhãn bệnh | `NIH` AUROC | `Hybrid` AUROC | `NIH` PR-AUC | `Hybrid` PR-AUC | Nhận xét chênh lệch đáng chú ý |
+|:---|---:|---:|---:|---:|:---|
+| `No Finding` | `0.8348` | `0.8346` | `0.8460` | `0.8703` | PR-AUC tăng (`+0.0243`) nhờ tỷ lệ ảnh lành VinDr |
+| `Atelectasis` | `0.8733` | `0.8567` | `0.4907` | `0.4298` | Giảm nhẹ khi hòa trộn hai miền dữ liệu |
+| `Cardiomegaly` | `0.9446` | `0.9361` | `0.4365` | **`0.6475`** | **PR-AUC tăng mạnh `+0.2110`** nhờ `5,427` GT BBox VinDr |
+| `Effusion` | `0.9125` | `0.9048` | `0.6325` | `0.5924` | Duy trì trên `0.90` AUROC ở cả hai bộ |
+| `Infiltration` | `0.7479` | `0.7425` | `0.4127` | `0.3652` | Nhãn mơ hồ nhất trên cả hai bộ kiểm thử |
+| `Mass` | `0.9187` | `0.8980` | `0.5311` | `0.4255` | AUROC duy trì mức ~`0.90` |
+| `Nodule` | `0.8708` | `0.8533` | `0.4067` | `0.3606` | Tổn thương kích thước nhỏ phụ thuộc độ phân giải |
+| `Pneumonia` | `0.8249` | `0.7893` | `0.1176` | `0.0409` | Dương tính rất hiếm (`1.12%` Train), độ nhạy thấp |
+| `Pneumothorax` | `0.9360` | `0.8965` | `0.5829` | `0.3750` | PR-AUC giảm khi gộp miền ảnh VinDr |
+| `Consolidation` | `0.8574` | `0.8537` | `0.2513` | `0.2399` | Gần như ổn định giữa hai bộ kiểm thử |
+| `Edema` | `0.9284` | `0.9110` | `0.2570` | `0.1731` | Không có GT BBox trên VinDr (`0` box) |
+| `Emphysema` | `0.9628` | `0.9521` | `0.5388` | `0.3930` | AUROC cao trên `0.95` ở cả hai bộ |
+| `Fibrosis` | `0.8879` | `0.8838` | `0.2462` | **`0.5037`** | **PR-AUC tăng hơn gấp đôi (`+0.2575`)** với `4,655` GT BBox |
+| `Pleural_Thickening` | `0.8546` | `0.8705` | `0.2607` | **`0.4361`** | **Cả AUROC & PR-AUC đều tăng** với `4,838` GT BBox |
+| `Hernia` | `0.9877` | `0.9546` | `0.6661` | `0.4635` | Cực hiếm (`0.18%` Train), AUROC > `0.95` trên cả hai bộ |
+
+</details>
+
+<table>
+  <thead>
+    <tr>
+      <th width="50%">Bộ kiểm thử NIH Thuần (<code>22,433</code> ảnh — <code>Results/NIH/</code>)</th>
+      <th width="50%">Bộ kiểm thử Hybrid NIH + VinDr-CXR (<code>12,427</code> ảnh — <code>Results/Hybrid/</code>)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="center"><img src="Results/NIH/768442025_1902576910701119_4466000942323446165_n.png" alt="NIH Per-Class AUROC" width="100%" /><br/><sub><b>AUROC từng lớp</b> — Mean AUROC = <code>0.8895</code></sub></td>
+      <td align="center"><img src="Results/Hybrid/767813591_37579580181657658_2904401735898438754_n.png" alt="Hybrid Per-Class AUROC" width="100%" /><br/><sub><b>AUROC từng lớp</b> — Mean AUROC = <code>0.8758</code></sub></td>
+    </tr>
+    <tr>
+      <td align="center"><img src="Results/NIH/768567603_2803604316689557_3764611404014924831_n.png" alt="NIH ROC Curves" width="100%" /><br/><sub><b>Đường cong ROC (15 lớp)</b> — AUC <code>0.748</code> .. <code>0.988</code></sub></td>
+      <td align="center"><img src="Results/Hybrid/771693777_1392565676338344_5011880117183055098_n.png" alt="Hybrid ROC Curves" width="100%" /><br/><sub><b>Đường cong ROC (15 lớp)</b> — AUC <code>0.743</code> .. <code>0.955</code></sub></td>
+    </tr>
+    <tr>
+      <td align="center"><img src="Results/NIH/770801179_1576467194142956_4317559929845389055_n.png" alt="NIH PR Curves" width="100%" /><br/><sub><b>Đường cong Precision–Recall</b> — Mean PR-AUC = <code>0.4451</code></sub></td>
+      <td align="center"><img src="Results/Hybrid/770572207_2984167958589011_6680795789819763591_n.png" alt="Hybrid PR Curves" width="100%" /><br/><sub><b>Đường cong Precision–Recall</b> — Mean PR-AUC = <code>0.4211</code></sub></td>
+    </tr>
+    <tr>
+      <td align="center"><img src="Results/NIH/767430405_1561766045400500_5616684675240473943_n.png" alt="NIH Overall Confusion Matrix" width="100%" /><br/><sub><b>Confusion Matrix tổng hợp</b> (<code>336,495</code> lượt đánh giá)</sub></td>
+      <td align="center"><img src="Results/Hybrid/766561926_1705872357307418_1532881488622979972_n.png" alt="Hybrid Overall Confusion Matrix" width="100%" /><br/><sub><b>Confusion Matrix tổng hợp</b> (<code>186,405</code> lượt đánh giá)</sub></td>
+    </tr>
+  </tbody>
+</table>
+
+<details>
+<summary><strong>Xem thêm 4 cặp biểu đồ chẩn đoán chi tiết (Confusion Matrix 15 lớp, Macro-F1 theo ngưỡng, Phân phối xác suất, Bảng console)</strong></summary>
+
+<table>
+  <thead>
+    <tr>
+      <th width="50%">Bộ kiểm thử NIH Thuần (<code>Results/NIH/</code>)</th>
+      <th width="50%">Bộ kiểm thử Hybrid NIH + VinDr-CXR (<code>Results/Hybrid/</code>)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="center"><img src="Results/NIH/768256658_2532335057229059_4851102685222873254_n.png" alt="NIH 15-Class Confusion Matrix" width="100%" /><br/><sub><b>Ma trận nhầm lẫn 15 lớp</b> (NIH)</sub></td>
+      <td align="center"><img src="Results/Hybrid/764861889_1429035209067796_6790864424246887320_n.png" alt="Hybrid 15-Class Confusion Matrix" width="100%" /><br/><sub><b>Ma trận nhầm lẫn 15 lớp</b> (Hybrid)</sub></td>
+    </tr>
+    <tr>
+      <td align="center"><img src="Results/NIH/769363162_2469824773486085_563319408560404763_n.png" alt="NIH Macro-F1 vs Threshold" width="100%" /><br/><sub><b>Macro-F1 theo ngưỡng</b> — Best Thresh = <code>0.65</code> (đỉnh ~<code>0.45</code>)</sub></td>
+      <td align="center"><img src="Results/Hybrid/771801654_3632923223528288_8348260807921492275_n.png" alt="Hybrid Macro-F1 vs Threshold" width="100%" /><br/><sub><b>Macro-F1 theo ngưỡng</b> — Best Thresh = <code>0.65</code> (đỉnh ~<code>0.43</code>)</sub></td>
+    </tr>
+    <tr>
+      <td align="center"><img src="Results/NIH/772481453_1368258034723270_5273848338232080919_n.png" alt="NIH Probability Distribution" width="100%" /><br/><sub><b>Phân phối xác suất dự đoán</b> (<code>GT=0</code> vs <code>GT=1</code>)</sub></td>
+      <td align="center"><img src="Results/Hybrid/770000442_1054842057278968_8783769218647026729_n.png" alt="Hybrid Probability Distribution" width="100%" /><br/><sub><b>Phân phối xác suất dự đoán</b> (<code>GT=0</code> vs <code>GT=1</code>)</sub></td>
+    </tr>
+    <tr>
+      <td align="center"><img src="Results/NIH/766619642_1622354512851542_7131116208405413447_n.png" alt="NIH Console Metrics Table" width="100%" /><br/><sub><b>Bảng log số liệu console</b> (NIH — Mean <code>0.8895</code> / <code>0.4451</code>)</sub></td>
+      <td align="center"><img src="Results/Hybrid/769032467_2213341239447217_1929267469861846157_n.png" alt="Hybrid Console Metrics Table" width="100%" /><br/><sub><b>Bảng log số liệu console</b> (Hybrid — Mean <code>0.8758</code> / <code>0.4211</code>)</sub></td>
+    </tr>
+  </tbody>
+</table>
+
+</details>
+
+---
+
+#### 3.3. Thử Nghiệm Ngoại Bộ Trên 200 Ảnh X-Quang Nhi Khoa Kermany (`100 NORMAL` / `100 PNEUMONIA`)
+
+Kiểm thử ngoài phân phối (OOD) thực hiện qua [`Backend/tools/summarize_public_evaluation.py`](Backend/tools/summarize_public_evaluation.py) trên bộ dữ liệu nhi khoa `probml/chest_xray_kaggle` (ngưỡng mặc định `0.5`, tài liệu chi tiết tại [`docs/danh-gia-200-anh-2026-11-08.md`](docs/danh-gia-200-anh-2026-11-08.md) và [`docs/kiem-thu-lai-yolo-2026-11-09.md`](docs/kiem-thu-lai-yolo-2026-11-09.md)):
+
+| Cấu hình thử nghiệm | Độ chính xác | Sensitivity (`Pneumonia`) | Specificity (`Normal`) | F1-Score | AUROC | Ghi chú kỹ thuật |
+|:---|---:|---:|---:|---:|---:|:---|
+| **Chỉ nhãn gốc `Pneumonia` (API ≥ `0.5`) — trước & sau khi nối YOLO** | `52.00%` (`104/200`, CI95 `45.10%–58.82%`) | `4.00%` (`4/100`) | `100.00%` (`100/100`) | `0.0769` | `0.8819` | Bật YOLO đạt `200/200` lượt thành công, trả `76` khung trên `50/200` ảnh (chỉ quan sát định tính vì bộ ảnh không có GT BBox và `yolov11m.pt` không có lớp `Pneumonia`) |
+| **Lỗi UI Top-6 cũ (chỉ hiển thị tối đa 6 nhãn đầu bảng)** | `51.00%` (`102/200`) | `2.00%` (`2/100`) | `100.00%` | — | — | Bỏ sót `2/4` ca dương (`TP=2, FN=98`) khi `Pneumonia` rơi khỏi Top-6 |
+| **Quy tắc phụ: Bất kỳ bệnh lý gốc ≥ ngưỡng (`Any Pathology`)** | `87.50%` (`175/200`) | `90.00%` (`90/100`) | `85.00%` (`85/100`) | — | — | Cho thấy bộ đặc trưng nhận ra bất thường phổi nhưng bị lệch nhãn/ngưỡng sang nhóm khác (`Infiltration`, `Consolidation`, `Effusion`) trên X-quang trẻ em |
+
+- **Ma trận nhầm lẫn chuẩn cho nhãn đích `Pneumonia` (ngưỡng `0.5`, `N = 200`)**: `TN = 100`, `FP = 0`, `FN = 96`, `TP = 4`. Kết quả minh họa rõ tác động của **lệch phân phối người lớn → trẻ em (domain shift)** và **ngưỡng bảo thủ `0.5`** đối với lớp hiếm (`1.12%` dương trong Train): khả năng phân hạng vẫn giữ tốt (`AUROC = 0.8819`) nhưng điểm xác suất tuyệt đối của `Pneumonia` hiếm khi vượt `0.5`.
+- Ngoài tập Kermany, nhật ký thử nghiệm công khai trực tuyến (ảnh Wikimedia PA/AP) và phân tích đối chiếu lỗi nhãn được lưu chi tiết tại [`docs/ket-qua-test-online-2026-11-08.md`](docs/ket-qua-test-online-2026-11-08.md) và [`docs/doi-chieu-nhan-va-ket-qua-2026-11-09.md`](docs/doi-chieu-nhan-va-ket-qua-2026-11-09.md).
+
+---
+
+#### 3.4. Ảnh Mẫu Đầu Vào & Minh Họa Kết Quả Trực Quan (`Results/EX/`)
+
+Chuỗi 4 ảnh mẫu dưới đây xuất từ ca bệnh **`Cardiomegaly` kèm tràn dịch màng phổi (`Effusion`)** trên ảnh X-quang thực tế [`Results/EX/Cardiomegally.png`](Results/EX/Cardiomegally.png) (`1060 × 960 px`, `828,344 bytes`, có máy tạo nhịp tim vùng ngực trái):
+
+<table>
+  <tbody>
+    <tr>
+      <td align="center" width="50%">
+        <img src="Results/EX/Cardiomegally.png" alt="Ảnh X-quang gốc Cardiomegaly" width="100%" /><br/>
+        <b>1. Ảnh X-quang đầu vào gốc</b> (<code>1060 × 960 px</code>)<br/>
+        <sub>Bóng tim giãn rộng kèm máy tạo nhịp tim ở ngực trái.</sub>
+      </td>
+      <td align="center" width="50%">
+        <img src="Results/EX/Cardiomegally_bbox.png" alt="Kết quả BBox CLI" width="100%" /><br/>
+        <b>2. Định vị BBox chế độ CLI (<code>run_predict.py</code>)</b><br/>
+        <sub>Khoanh vùng <code>Cardiomegaly 55%</code> (xanh lá) và 2 khung <code>Effusion 16% / 14%</code> (xanh lơ).</sub>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" width="50%">
+        <img src="Results/EX/Cardiomegally_fusion.png" alt="Display Fusion Attention Overlay" width="100%" /><br/>
+        <b>3. Bản đồ nhiệt Display Fusion</b><br/>
+        <sub>Bản đồ chú ý của Classifier được hội tụ bên trong khung định vị BBox.</sub>
+      </td>
+      <td align="center" width="50%">
+        <img src="Results/EX/Cardiomegally_predict.png" alt="Bố cục 3 khung dự đoán đầy đủ" width="100%" /><br/>
+        <b>4. Tổng hợp 3 khung &amp; phổ xác suất 15 bệnh</b><br/>
+        <sub>Đối chiếu trực tiếp ảnh gốc, Display Fusion và xác suất 15 nhãn (đậm màu = có BBox).</sub>
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+- **So sánh hành vi CLI (`hybrid_model.pth`) vs Web API `/v3/predict` (`hybrid_large_v2.pth` + `yolov11m.pt`) trên ca mẫu này**:
+  - 3 ảnh tĩnh `_bbox.png`, `_fusion.png`, `_predict.png` ở trên là đầu ra kết xuất từ lệnh CLI `run_predict.py` với `hybrid_model.pth`.
+  - Khi đưa qua API `/v3/predict` nối `yolov11m.pt`: bản ghi [`docs/noi-yolo-2026-11-09.md`](docs/noi-yolo-2026-11-09.md) với `hybrid_model.pth` ghi nhận **`6` khung Cascade** (`Cardiomegaly [326, 550, 941, 831]` YOLO `65.54%` / Cascade `54.51%`, kèm `Aortic enlargement`, `Calcification`, 3× `Pleural effusion`).
   - Với checkpoint mặc định hiện hành trên web (`hybrid_large_v2.pth`), `/v3/predict` trả **`7` khung YOLO** (gồm 2× `Cardiomegaly` với khung chính `[326, 549, 941, 830]` YOLO `65.57%` / Cascade `63.28%`, `Aortic enlargement`, `Calcification`, 3× `Pleural effusion`) và bổ sung **`10` `hybrid_boxes`** (`2` khung/bệnh cho `Atelectasis`, `Infiltration`, `Consolidation`, `Pleural_Thickening`, `Pneumonia`).
-  - Ba ảnh tĩnh `Cardiomegally_bbox.png`, `Cardiomegally_fusion.png`, `Cardiomegally_predict.png` trong `Results/EX/` là sản phẩm kết xuất từ lần chạy CLI `run_predict.py` (với `hybrid_model.pth`).
-- **Thư mục `Results/NIH/` và `Results/Hybrid/`**:
-  - Lưu 16 biểu đồ ảnh tĩnh từ các đợt thử nghiệm trước (`Mean AUROC 0.8895` trên NIH và `0.8758` trên Hybrid); chi tiết theo dõi trong thư mục `docs/` và không đồng nhất với hiệu năng trên mọi quần thể ảnh ngoài phân phối.
 
 ---
 
